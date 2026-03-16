@@ -30,10 +30,14 @@ CREATE TABLE IF NOT EXISTS website_data (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     business_id INTEGER,
     site_url TEXT,
+    site_status TEXT,
+    site_error TEXT,
     about_text TEXT,
     services_text TEXT,
     emails TEXT,
     phones TEXT,
+    socials TEXT,
+    tech_stack TEXT,
     collected_at TEXT,
     FOREIGN KEY (business_id) REFERENCES businesses(id)
 );
@@ -93,6 +97,17 @@ def init_db(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE enrichment ADD COLUMN role TEXT")
     if "icp_fit" not in ecols:
         conn.execute("ALTER TABLE enrichment ADD COLUMN icp_fit TEXT")
+
+    wcols = {row["name"] for row in conn.execute("PRAGMA table_info(website_data)").fetchall()}
+    for col, typedef in [
+        ("site_status", "TEXT"),
+        ("site_error",  "TEXT"),
+        ("socials",     "TEXT"),
+        ("tech_stack",  "TEXT"),
+    ]:
+        if col not in wcols:
+            conn.execute(f"ALTER TABLE website_data ADD COLUMN {col} {typedef}")
+
     conn.commit()
 
 
@@ -145,10 +160,24 @@ def update_business(conn: sqlite3.Connection, business_id: int, data: Dict[str, 
 def insert_website_data(conn: sqlite3.Connection, business_id: int, data: Dict[str, Any]) -> None:
     conn.execute(
         """
-        INSERT INTO website_data (business_id, site_url, about_text, services_text, emails, phones, collected_at)
-        VALUES (:business_id, :site_url, :about_text, :services_text, :emails, :phones, :collected_at)
+        INSERT INTO website_data (business_id, site_url, site_status, site_error,
+            about_text, services_text, emails, phones, socials, tech_stack, collected_at)
+        VALUES (:business_id, :site_url, :site_status, :site_error,
+            :about_text, :services_text, :emails, :phones, :socials, :tech_stack, :collected_at)
         """,
-        {"business_id": business_id, **data},
+        {
+            "business_id": business_id,
+            "site_url":    data.get("site_url", ""),
+            "site_status": data.get("site_status", ""),
+            "site_error":  data.get("site_error", ""),
+            "about_text":  data.get("about_text", ""),
+            "services_text": data.get("services_text", ""),
+            "emails":      data.get("emails", ""),
+            "phones":      data.get("phones", ""),
+            "socials":     data.get("socials", ""),
+            "tech_stack":  data.get("tech_stack", ""),
+            "collected_at": data.get("collected_at", ""),
+        },
     )
     conn.commit()
 

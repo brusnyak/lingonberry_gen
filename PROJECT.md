@@ -1,67 +1,78 @@
 # leadgen — Project Status
 
-## What this is
+Part of the biz automation system. See `../SPEC.md` for full picture.
+Own GitHub repo (separate from other mini-projects).
 
-Part of a larger personal automation agency system (see `../SPEC.md`).
-Goal: collect leads from public sources, enrich them with LLM, validate quality,
-and produce a clean qualified list ready for automated outreach.
+## Status: ~80% complete
 
-## Current State: ~75% complete
+## What works
 
-### Done
-
-- Google Maps scraper (Playwright)
-  - Two-phase approach: scroll feed to collect all card URLs, then visit each directly
-  - Extracts: name, category, rating, reviews, address, phone, website, email (from About tab + panel scan), hours
-  - Automation banner suppressed (`ignore_default_args`, `navigator.webdriver` masked)
-  - Junk/sponsored card filtering
-  - Debug screenshots on failure saved to `data/debug/`
+- Google Maps scraper (Playwright, two-phase)
+  - Phase 1: scroll feed, collect all card URLs as strings
+  - Phase 2: visit each URL directly — no stale element refs
+  - Extracts: name, category, rating, reviews, address, phone, website, email (About tab), hours
+  - Private-use unicode icons stripped from all fields (phone, category were dirty)
+  - Category junk filter (rejects Google review disclaimer text)
+  - Automation banner suppressed (ignore_default_args + navigator.webdriver masked)
+  - Debug screenshots saved to data/debug/ on failure
 
 - Website scraper (requests + BeautifulSoup)
-  - Visits business website, finds about/services/contact pages
+  - Visits business website, finds about/services/contact subpages
   - Extracts: about text, services text, emails, phones
 
-- LLM enrichment (`enrichment/ollama.py`)
-  - Tries local Ollama first, auto-falls back to OpenRouter free models
-  - OpenRouter model priority: llama-3.3-70b → nemotron-30b → qwen3-80b → mistral-small → gemma-3-27b → llama-3.2-3b
+- LLM enrichment (enrichment/ollama.py)
+  - Tries Ollama cloud first (api.ollama.com, ~1.4s/lead, Bearer auth)
+  - Auto-falls back to OpenRouter free models if Ollama fails
+  - OpenRouter priority: llama-3.3-70b → nemotron-30b → qwen3-80b → mistral-small → gemma-3-27b → llama-3.2-3b
   - Returns: industry, role, icp_fit (0-100), pain_points, outreach_message
 
-- SQLite storage (`storage/db.py`)
+- .env loading: main.py loads ../env at startup — OLLAMA_BASE_URL, keys all available
+
+- SQLite storage (storage/db.py)
   - Tables: businesses, website_data, enrichment, query_runs
-  - Columns include: email_maps, hours, validation_status, validation_notes
+  - Fields: email_maps, hours, validation_status, validation_notes
   - Auto-migration on init
 
-- Streamlit review UI (`ui.py`)
-  - Approve/reject leads before enrichment
-  - View outreach drafts
+- Streamlit review UI (ui.py) — approve leads before enrichment, view outreach drafts
 
-- Scripts + Makefile — all paths relative, no hardcoded absolute paths
+- Scripts + Makefile — all relative paths, no hardcoded absolutes
 
-### Not yet built (next steps)
+- .gitignore — excludes .venv, data/*.db, data/*.csv, playwright-profile, .env
 
-1. Validation layer — AI-driven dedup, chain/franchise filter, contact reachability check,
-   auto-assigns status: `qualified` / `skip` / `needs_review`
-2. DuckDuckGo / OpenSerp web search source — find niche directories and local biz sites
-   beyond Google Maps
-3. Telegram bot integration — remote trigger scrape runs, get daily reports
-4. OpenRouter enrichment needs `OPENROUTER_API_KEY` in `../.env` (already set)
+## Stress test results (this session)
 
-## Stack
+- 60 leads collected across 3 queries (dentists, accountants, web agencies — Bratislava)
+- 21 enriched with Ollama cloud gemma3:4b
+- Pipeline timing: scrape ~2-3min/20 leads, enrichment ~1.4s/lead via Ollama cloud
+- Phone numbers clean, categories clean, outreach drafts coherent
+- 1 email captured directly from Maps panel (recepcia@smileclinic.sk)
+- Most emails come from website scraper, not Maps panel
 
-- Python 3.11
-- Playwright (Chromium) — browser automation
-- requests + BeautifulSoup — website scraping
-- SQLite — storage
-- Streamlit — review UI
-- Ollama (local) + OpenRouter (cloud fallback) — LLM enrichment
+## Known issues / next fixes
 
-## API Keys (stored in `../.env`)
+- category selector still occasionally returns rating number instead of category text
+  (Maps DOM varies — needs more selector fallbacks or post-clean digit-only filter)
+- email capture from Maps About tab is rare — most businesses don't list it there
+- validation_status column exists in DB but validation layer not built yet
 
-- `OLLAMA_BASE_URL` + `OLLAMA_API_KEY` — local Ollama instance
-- `OPENROUTER_API_KEY` — primary cloud LLM (free models)
-- `GOOGLE_AI_STUDIO_API_KEY` — Gemini (available for future use)
-- `HF_API_KEY` — HuggingFace (available for embeddings/classification)
-- `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` — bot wired, not yet integrated
+## What's next (next chat)
+
+1. Validation layer:
+   - dedup by name similarity (not just place_id)
+   - filter chains/franchises (multiple listings same phone/website)
+   - contact reachability check (email format valid, phone format valid)
+   - AI classification: qualified / skip / needs_review
+   - extend Streamlit UI to show validation status
+
+2. DuckDuckGo / OpenSerp as second lead source (niche directories, not just Maps)
+
+3. Telegram bot integration:
+   - /scrape [query] [max] — trigger a run
+   - /status — pipeline state
+   - /report — daily summary
+   - /export — send CSV
+
+4. Push to GitHub (repo is clean and ready)
 
 ## How to run
 
@@ -69,42 +80,47 @@ and produce a clean qualified list ready for automated outreach.
 cd leadgen
 source .venv/bin/activate
 
-# single query
-python main.py --query "dentists in Bratislava" --max 50 --headless --profile data/playwright-profile
+# scrape + enrich (Ollama cloud auto-used via ../.env)
+python main.py --query "dentists in Bratislava" --max 50 --headless \
+  --profile data/playwright-profile --model gemma3:4b
 
-# skip LLM enrichment (scrape only)
-python main.py --query "accountants in Vienna" --max 50 --headless --skip-llm --profile data/playwright-profile
+# scrape only, skip LLM
+python main.py --query "accountants in Vienna" --max 50 --headless --skip-llm \
+  --profile data/playwright-profile
 
 # enrich already-approved leads
-python main.py --enrich-approved --model llama3.1
+python main.py --enrich-approved --model gemma3:4b
 
 # review UI
 streamlit run ui.py
 ```
 
-## Bigger picture (from `../SPEC.md`)
+## Stack
+
+- Python 3.11 (pyenv)
+- Playwright 1.50 (Chromium)
+- requests + BeautifulSoup4
+- SQLite3
+- Streamlit
+- Ollama cloud (api.ollama.com) + OpenRouter fallback
+
+## Repo structure
 
 ```
-leadgen  →  outreach  →  planning
+leadgen/
+  main.py              # CLI entrypoint
+  ui.py                # Streamlit review UI
+  scrapers/
+    google_maps.py     # Maps scraper (two-phase)
+    website.py         # Website scraper
+  enrichment/
+    ollama.py          # LLM enrichment (Ollama cloud + OpenRouter fallback)
+  storage/
+    db.py              # SQLite schema, queries, CSV export
+  scripts/             # bash wrappers (run.sh, batch, ui, enrich)
+  data/                # leads.db, leads.csv, debug/ — gitignored
+  Makefile
+  requirements.txt
+  .gitignore
+  PROJECT.md           # this file
 ```
-
-- `outreach/` — send personalized emails/LinkedIn DMs to qualified leads,
-  listen for replies, extract pain points, daily Telegram report
-- `planning/` — universal biz thinking tool: niche validation, offer building,
-  agent task planner, ops Q&A
-
-The end goal is a Telegram-controlled agent that runs the full cycle autonomously:
-scrape → enrich → validate → outreach → parse replies → report insights.
-You only step in to review qualified leads and make final decisions.
-
-## Agentic layer (future)
-
-A central agent controller (`../agent/`) will:
-- Accept commands via Telegram bot
-- Route tasks to the right tool (leadgen, outreach, planning)
-- Use OpenRouter for reasoning/planning
-- Use Gemini for web research
-- Maintain state in SQLite
-- Send daily summaries back to Telegram
-
-This is the "OpenClaw-lite" described in `../notes/`.

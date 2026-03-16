@@ -1,9 +1,19 @@
 import argparse
+import os
 import time
 from datetime import datetime
 from pathlib import Path
 
 _HERE = Path(__file__).parent
+
+# load ../.env so OLLAMA_BASE_URL, OPENROUTER_API_KEY etc. are available
+_env_file = _HERE.parent / ".env"
+if _env_file.exists():
+    for _line in _env_file.read_text(encoding="utf-8").splitlines():
+        _line = _line.strip()
+        if _line and not _line.startswith("#") and "=" in _line:
+            _k, _, _v = _line.partition("=")
+            os.environ.setdefault(_k.strip(), _v.strip())
 
 from storage.db import (
     connect,
@@ -18,6 +28,8 @@ from storage.db import (
 from scrapers.google_maps import scrape_google_maps
 from scrapers.website import scrape_site
 from enrichment.ollama import enrich_business
+from validation.validator import run_validation
+from validation.website_intel import run_website_intel, _ensure_columns as _ensure_intel_cols
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import traceback
 
@@ -51,10 +63,17 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=6, help="Worker threads for website/LLM steps")
     parser.add_argument("--retries", type=int, default=2, help="Retries for website/LLM steps")
     parser.add_argument("--review", action="store_true", help="Review mode: confirm each listing before capture")
+    parser.add_argument("--validate", action="store_true", help="Run validation layer on pending leads")
+    parser.add_argument("--validate-all", action="store_true", help="Re-validate all leads (not just pending)")
+    parser.add_argument("--no-ai-validate", action="store_true", help="Use rule-based validation only (no LLM)")
+    parser.add_argument("--site-intel", action="store_true", help="Run website intelligence layer (reachability + brand profile)")
+    parser.add_argument("--site-intel-all", action="store_true", help="Re-run site intel on all leads (not just missing)")
     args = parser.parse_args()
 
-    if not args.enrich_approved and not args.query and not args.queries_file:
-        raise SystemExit("Provide --query or --queries-file")
+    if not args.enrich_approved and not args.query and not args.queries_file \
+            and not args.validate and not args.validate_all \
+            and not args.site_intel and not args.site_intel_all:
+        raise SystemExit("Provide --query, --queries-file, --validate, --validate-all, --site-intel, or --site-intel-all")
 
     queries = []
     if args.query:
@@ -65,6 +84,7 @@ def main() -> None:
     today_tag = datetime.utcnow().strftime("%Y-%m-%d")
     conn = connect(args.db)
     init_db(conn)
+    _ensure_intel_cols(conn)
 
     def score_lead(lead: dict) -> tuple[float, str]:
         score = 0.0
@@ -170,6 +190,22 @@ def main() -> None:
                         print(f"[pipeline] {i}/{len(futures)} done")
 
             log_query_run(conn, run_query, today_tag, args.max, len(leads), datetime.utcnow().isoformat())
+
+    if args.site_intel or args.site_intel_all:
+        only_missing = not args.site_intel_all
+        use_ai = not args.no_ai_validate
+        print(f"[site-intel] Running website intelligence (only_missing={only_missing}, use_ai={use_ai})")
+        counts = run_website_intel(conn, use_ai=use_ai, only_missing=only_missing)
+        print(f"[site-intel] Done — reachable={counts['reachable']} unreachable={counts['unreachable']} "
+              f"strong={counts.get('strong',0)} moderate={counts.get('moderate',0)} "
+              f"weak={counts.get('weak',0)} skip={counts.get('skip',0)} total={counts['total']}")
+
+    if args.validate or args.validate_all:
+        only_pending = not args.validate_all
+        use_ai = not args.no_ai_validate
+        print(f"[validate] Running validation (only_pending={only_pending}, use_ai={use_ai})")
+        counts = run_validation(conn, use_ai=use_ai, only_pending=only_pending)
+        print(f"[validate] Done — qualified={counts['qualified']} skip={counts['skip']} needs_review={counts['needs_review']} total={counts['total']}")
 
     export_csv(conn, args.csv)
     print(f"[done] Exported CSV to {args.csv}")

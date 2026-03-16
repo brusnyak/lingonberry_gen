@@ -11,7 +11,13 @@ from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeo
 # - helpers -
 
 def _clean(text):
-    return (text or "").strip()
+    if not text:
+        return ""
+    # strip Maps icon chars (private-use unicode block e000-f8ff)
+    text = re.sub(r"[\ue000-\uf8ff]", "", text)
+    # collapse whitespace
+    text = re.sub(r"\s+", " ", text).strip()
+    return text
 
 def _safe_hash(value):
     return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
@@ -59,6 +65,8 @@ def _get_name(page):
             continue
     return ""
 
+_CATEGORY_JUNK = {"reviews aren", "google checks", "learn more", "not verified"}
+
 def _get_category(page):
     for sel in [
         "button[jsaction*='pane.rating.category']",
@@ -70,7 +78,7 @@ def _get_category(page):
             el = page.locator(sel)
             if el.count() > 0:
                 text = _clean(el.first.inner_text())
-                if text:
+                if text and not any(j in text.lower() for j in _CATEGORY_JUNK):
                     return text
         except Exception:
             continue

@@ -1,4 +1,4 @@
-.PHONY: install browser run batch ui enrich
+.PHONY: install browser run batch ui enrich validate
 
 install:
 	pip install -r requirements.txt
@@ -17,3 +17,9 @@ ui:
 
 enrich:
 	bash scripts/enrich.sh $(m)
+
+validate:
+	python main.py --validate --db data/leads.db
+
+validate-all:
+	python main.py --validate-all --db data/leads.db
