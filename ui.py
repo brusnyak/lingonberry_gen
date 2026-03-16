@@ -3,8 +3,10 @@ from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+from datetime import datetime
 
-DB_DEFAULT = "/Users/yegor/Documents/Agency & Security Stuff/BIZ/leadgen/data/leads.db"
+_HERE = Path(__file__).parent
+DB_DEFAULT = str(_HERE / "data/leads.db")
 
 
 def load_df(db_path: str) -> pd.DataFrame:
@@ -12,8 +14,9 @@ def load_df(db_path: str) -> pd.DataFrame:
     df = pd.read_sql_query(
         """
         SELECT b.id, b.name, b.category, b.rating, b.address, b.phone, b.website, b.maps_url, b.query,
+               b.approved, b.approved_at, b.score, b.score_reason,
                w.about_text, w.services_text,
-               e.classification, e.pain_points, e.outreach_message
+               e.industry, e.role, e.icp_fit, e.pain_points, e.outreach_message
         FROM businesses b
         LEFT JOIN website_data w ON w.business_id = b.id
         LEFT JOIN enrichment e ON e.business_id = b.id
@@ -29,10 +32,14 @@ def save_edits(db_path: str, edited: pd.DataFrame) -> None:
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
     for _, row in edited.iterrows():
+        approved_val = int(row["approved"]) if row["approved"] in [0, 1] else int(bool(row["approved"]))
+        approved_at = row.get("approved_at")
+        if approved_val == 1 and (approved_at is None or str(approved_at).strip() == ""):
+            approved_at = datetime.utcnow().isoformat()
         cur.execute(
             """
             UPDATE businesses
-            SET name=?, category=?, rating=?, address=?, phone=?, website=?, maps_url=?, query=?
+            SET name=?, category=?, rating=?, address=?, phone=?, website=?, maps_url=?, query=?, approved=?, approved_at=?
             WHERE id=?
             """,
             (
@@ -44,6 +51,8 @@ def save_edits(db_path: str, edited: pd.DataFrame) -> None:
                 row["website"],
                 row["maps_url"],
                 row["query"],
+                approved_val,
+                approved_at,
                 int(row["id"]),
             ),
         )
@@ -63,6 +72,31 @@ def main() -> None:
     df = load_df(db_path)
     st.write(f"Loaded {len(df)} leads")
 
+    st.subheader("Review Queue (Approve before enrichment)")
+    min_score = st.slider("Min score", 0, 100, 20)
+    unapproved = df[df["approved"] != 1].copy()
+    unapproved = unapproved[unapproved["score"].fillna(0) >= min_score]
+    st.write(f"Unapproved leads: {len(unapproved)}")
+    queue_cols = [
+        "id",
+        "name",
+        "category",
+        "rating",
+        "address",
+        "phone",
+        "website",
+        "maps_url",
+        "query",
+        "approved",
+        "approved_at",
+        "score",
+        "score_reason",
+    ]
+    edited_queue = st.data_editor(unapproved[queue_cols], num_rows="dynamic", use_container_width=True)
+    if st.button("Save approvals"):
+        save_edits(db_path, edited_queue)
+        st.success("Saved approvals")
+
     editable_cols = [
         "id",
         "name",
@@ -73,6 +107,8 @@ def main() -> None:
         "website",
         "maps_url",
         "query",
+        "approved",
+        "approved_at",
     ]
 
     edited = st.data_editor(df[editable_cols], num_rows="dynamic", use_container_width=True)
@@ -82,7 +118,7 @@ def main() -> None:
         st.success("Saved")
 
     st.subheader("Outreach Drafts")
-    st.dataframe(df[["id", "classification", "pain_points", "outreach_message"]], use_container_width=True)
+    st.dataframe(df[["id", "industry", "role", "icp_fit", "pain_points", "outreach_message"]], use_container_width=True)
 
 
 if __name__ == "__main__":

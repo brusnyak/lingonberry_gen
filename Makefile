@@ -1,16 +1,19 @@
-.PHONY: install browser run batch ui
+.PHONY: install browser run batch ui enrich
 
 install:
-	pip install -r /Users/yegor/Documents/Agency\ \&\ Security\ Stuff/BIZ/leadgen/requirements.txt
+	pip install -r requirements.txt
 
 browser:
 	python -m playwright install chromium
 
 run:
-	/Users/yegor/Documents/Agency\ \&\ Security\ Stuff/BIZ/leadgen/scripts/run.sh "$(q)"
+	bash scripts/run.sh "$(q)"
 
 batch:
-	/Users/yegor/Documents/Agency\ \&\ Security\ Stuff/BIZ/leadgen/scripts/run_batch.sh $(qf)
+	bash scripts/run_batch.sh $(qf)
 
 ui:
-	/Users/yegor/Documents/Agency\ \&\ Security\ Stuff/BIZ/leadgen/scripts/ui.sh
+	bash scripts/ui.sh
+
+enrich:
+	bash scripts/enrich.sh $(m)

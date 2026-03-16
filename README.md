@@ -36,6 +36,12 @@ Review UI:
 make ui
 ```
 
+Enrich approved leads (after you approve in the UI):
+```bash
+python main.py --enrich-approved --model llama3.1
+make enrich m=llama3.1
+```
+
 Outputs:
 - SQLite: `data/leads.db`
 - CSV: `data/leads.csv`
@@ -49,6 +55,6 @@ Outputs:
 ## Example Flags
 
 ```bash
-python main.py --query "accountants in Vienna" --max 100 --model llama3.1-4k
+python main.py --query "accountants in Vienna" --max 100 --model llama3.1
 python main.py --queries-file data/queries.txt --daily --max 50 --headless
 ```
