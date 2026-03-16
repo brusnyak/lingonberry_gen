@@ -8,52 +8,65 @@ from typing import Dict, List, Optional, Tuple
 
 from playwright.sync_api import sync_playwright, TimeoutError as PlaywrightTimeoutError
 
-# - helpers -
 
-def _clean(text):
-    if not text:
-        return ""
-    # strip Maps icon chars (private-use unicode block e000-f8ff)
-    text = re.sub(r"[\ue000-\uf8ff]", "", text)
-    # collapse whitespace
-    text = re.sub(r"\s+", " ", text).strip()
-    return text
+def _clean(text: Optional[str]) -> str:
+    return (text or "").strip()
 
-def _safe_hash(value):
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()[:16]
 
-def _human_delay(min_s, max_s):
-    if max_s > 0:
+def _safe_hash(value: str) -> str:
+    return hashlib.sha256(value.encode()).digest().hex()[:16]
+
+
+def _human_delay(min_s: float = 1.0, max_s: float = 2.5) -> None:
+    if max_s > min_s > 0:
         time.sleep(random.uniform(min_s, max_s))
 
-def _debug_screenshot(page, label):
+
+def _debug_screenshot(page, label: str = "debug") -> None:
     try:
-        Path("data/debug").mkdir(parents=True, exist_ok=True)
-        page.screenshot(path=f"data/debug/{label}_{int(time.time())}.png", full_page=True)
+        Path("debug").mkdir(parents=True, exist_ok=True)
+        path = f"debug/{label}_{int(time.time() * 1000)}.png"
+        page.screenshot(path=path, full_page=True)
     except Exception:
         pass
 
-def _hide_webdriver(page):
-    """Mask navigator.webdriver to suppress the automation banner."""
+
+def _hide_webdriver(page) -> None:
+    """Mask navigator.webdriver to avoid detection banners."""
     try:
-        page.add_init_script(
-            "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});"
-            "window.chrome={runtime:{}};"
+        page.evaluate(
+            """
+            Object.defineProperty(navigator, 'webdriver', {get: () => undefined});
+            window.chrome = { runtime: {} };
+            """
         )
     except Exception:
         pass
 
-# - junk filter -
+
+# ── Field extractors ─────────────────────────────────────────────────────────
+
 
 _JUNK_NAMES = {
-    "results", "výsledky", "search results",
-    "sponzorované", "sponsored", "advertisement", "reklama",
+    "results",
+    "výsledky",
+    "search results",
+    "sponzorované",
+    "sponsored",
+    "advertisement",
+    "reklama",
 }
 
-# - field extractors -
 
-def _get_name(page):
-    for sel in ["h1.DUwDvf", "h1[class*='fontHeadlineLarge']", "h1"]:
+def _get_name(page) -> str:
+    selectors = [
+        "h1.DUwDvf",
+        "h1.fontHeadlineLarge",
+        "div.fontHeadlineLarge",
+        "h1",
+    ]
+
+    for sel in selectors:
         try:
             el = page.locator(sel)
             if el.count() == 0:
@@ -65,53 +78,64 @@ def _get_name(page):
             continue
     return ""
 
-_CATEGORY_JUNK = {"reviews aren", "google checks", "learn more", "not verified"}
 
-def _get_category(page):
-    for sel in [
+def _get_category(page) -> str:
+    selectors = [
         "button[jsaction*='pane.rating.category']",
         "button[aria-label^='Category']",
         "button[data-item-id='category']",
         "div.fontBodyMedium span",
-    ]:
+        "span.fontBodyMedium",
+    ]
+
+    for sel in selectors:
         try:
             el = page.locator(sel)
             if el.count() > 0:
                 text = _clean(el.first.inner_text())
-                if text and not any(j in text.lower() for j in _CATEGORY_JUNK):
+                if text and "·" in text:
+                    return text.split("·")[0].strip()
+                if text:
                     return text
         except Exception:
             continue
     return ""
 
-def _get_rating_reviews(page):
+
+def _get_rating_reviews(page) -> Tuple[Optional[float], Optional[int]]:
     rating = None
     reviews = None
+
     try:
-        el = page.locator("span[aria-label*='stars'], span[aria-label*='hviezd']")
+        el = page.locator("[aria-label*='hviezd'], [aria-label*='stars']")
         if el.count():
-            m = re.search(r"([\d.]+)", el.first.get_attribute("aria-label") or "")
+            m = re.search(r"(\d+[.,]?\d?)[^\d]*★", el.first.get_attribute("aria-label") or "")
             if m:
-                rating = float(m.group(1))
+                rating = float(m.group(1).replace(",", "."))
     except Exception:
         pass
+
     try:
-        el = page.locator("button[aria-label*='reviews'], button[aria-label*='recenzií']")
+        el = page.locator("[aria-label*='recenzií'], [aria-label*='reviews']")
         if el.count():
-            m = re.search(r"([\d,]+)", el.first.get_attribute("aria-label") or "")
+            m = re.search(r"(\d+(?:,\d+)?)", el.first.get_attribute("aria-label") or "")
             if m:
                 reviews = int(m.group(1).replace(",", ""))
     except Exception:
         pass
+
     return rating, reviews
 
-def _get_website(page):
-    for sel in [
+
+def _get_website(page) -> str:
+    selectors = [
         "a[data-item-id='authority']",
         "a[aria-label*='Website']",
         "a[aria-label*='Webová stránka']",
-        "a[aria-label*='Webové stránky']",
-    ]:
+        "a[aria-label*='Webseite']",
+    ]
+
+    for sel in selectors:
         try:
             el = page.locator(sel)
             if el.count() > 0:
@@ -125,54 +149,63 @@ def _get_website(page):
             continue
     return ""
 
-def _get_phone(page):
-    for sel in [
+
+def _get_phone(page) -> str:
+    selectors = [
         "[data-item-id='phone']",
         "button[aria-label*='Phone']",
         "button[aria-label*='Telefón']",
         "div[aria-label*='Phone']",
-    ]:
+    ]
+
+    for sel in selectors:
         try:
             el = page.locator(sel)
             if el.count() > 0:
-                t = _clean(el.first.inner_text())
-                if t:
-                    return t
+                text = _clean(el.first.inner_text())
+                if text:
+                    return text
         except Exception:
             continue
     return ""
 
-def _get_address(page):
-    for sel in [
-        "button[data-item-id='address']",
+
+def _get_address(page) -> str:
+    selectors = [
         "[data-item-id='address']",
         "button[aria-label*='Address']",
         "button[aria-label*='Adresa']",
-    ]:
+    ]
+
+    for sel in selectors:
         try:
             el = page.locator(sel)
             if el.count() > 0:
-                t = _clean(el.first.inner_text())
-                if t:
-                    return t
+                text = _clean(el.first.inner_text())
+                if text:
+                    return text
         except Exception:
             continue
     return ""
 
-def _get_email_from_panel(page):
-    EMAIL_RE = re.compile(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", re.I)
+
+def _get_email_from_panel(page) -> str:
+    email_pattern = re.compile(r"[a-zA-Z0-9_.+-]+@[A-Z0-9-]+\.[A-Z]{2,}", re.I)
+
     try:
         panel = page.locator("div[role='main']")
-        text = _clean(panel.inner_text()) if panel.count() > 0 else ""
-        emails = [e for e in EMAIL_RE.findall(text)
-                  if "google" not in e.lower() and "gstatic" not in e.lower()]
+        if panel.count() == 0:
+            return ""
+        text = panel.inner_text()
+        emails = [e for e in email_pattern.findall(text) if "google" not in e.lower() and "gstatic" not in e.lower()]
         if emails:
             return emails[0]
     except Exception:
         pass
     return ""
 
-def _get_place_id_from_url(url):
+
+def _get_place_id_from_url(url: str) -> Optional[str]:
     m = re.search(r"place/[^/]+/([^/?@]+)", url)
     if m:
         return m.group(1)
@@ -181,50 +214,72 @@ def _get_place_id_from_url(url):
         return m.group(1)
     return None
 
-# - about tab -
 
-_ABOUT_LABELS = ["About", "Informácie", "Info", "Über"]
+# ── About tab (email + opening hours) ────────────────────────────────────────
 
-def _extract_about_tab(page):
+_ABOUT_TAB_LABELS = ["About", "Informácie", "Info", "Über", "O nás"]
+
+
+def _extract_about_tab(page) -> Dict[str, str]:
     result = {"email_maps": "", "hours": ""}
-    for label in _ABOUT_LABELS:
+
+    email_pattern = re.compile(r"[a-zA-Z0-9_.+-]+@[A-Z0-9-]+\.[A-Z]{2,}", re.I)
+    hours_pattern = re.compile(
+        r"(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|"
+        r"Pondelok|Utorok|Streda|Štvrtok|Piatok|Sobota|Nedeľa)"
+        r".*?(\d{1,2}[:.]\d{2})\s*–\s*(\d{1,2}[:.]\d{2})",
+        re.I | re.DOTALL,
+    )
+
+    for label in _ABOUT_TAB_LABELS:
         for sel in [
-            f"button[role='tab']:has-text('{label}')",
+            f"button[aria-label*='{label}']",
             f"div[role='tab']:has-text('{label}')",
+            f"button:has-text('{label}')",
         ]:
             try:
                 el = page.locator(sel)
-                if el.count() > 0:
-                    el.first.click(timeout=2000)
-                    page.wait_for_timeout(700)
-                    panel_text = _clean(page.locator("div[role='main']").inner_text())
-                    EMAIL_RE = re.compile(r"[A-Z0-9._%+\-]+@[A-Z0-9.\-]+\.[A-Z]{2,}", re.I)
-                    emails = [e for e in EMAIL_RE.findall(panel_text)
-                              if "google" not in e.lower() and "gstatic" not in e.lower()]
-                    if emails:
-                        result["email_maps"] = emails[0]
-                    hm = re.search(
-                        r"(Monday|Tuesday|Wednesday|Thursday|Friday|Saturday|Sunday|"
-                        r"Pondelok|Utorok|Streda|Štvrtok|Piatok|Sobota|Nedeľa)[^\n]{0,200}",
-                        panel_text, re.I
-                    )
-                    if hm:
-                        result["hours"] = hm.group(0)[:300]
+                if el.count() == 0:
+                    continue
+                el.first.click(timeout=3000)
+                page.wait_for_timeout(900)
+
+                panel_text = page.inner_text("div[role='main']") or ""
+
+                emails = [
+                    e
+                    for e in email_pattern.findall(panel_text)
+                    if "google" not in e.lower() and "gstatic" not in e.lower()
+                ]
+                if emails:
+                    result["email_maps"] = emails[0]
+
+                hours_match = hours_pattern.search(panel_text)
+                if hours_match:
+                    result["hours"] = hours_match.group(0).strip()
+
+                if result["email_maps"] or result["hours"]:
                     return result
+
             except Exception:
                 continue
+
     return result
 
-# - wait helpers -
 
-def _wait_for_detail_panel(page, timeout_ms=12000):
-    for sel in [
+# ── Wait & consent helpers ───────────────────────────────────────────────────
+
+
+def _wait_for_detail_panel(page, timeout_ms: int = 15000) -> bool:
+    selectors = [
         "h1.DUwDvf",
-        "h1[class*='fontHeadlineLarge']",
+        "h1.fontHeadlineLarge",
         "button[data-item-id='address']",
         "a[data-item-id='authority']",
         "button[data-item-id='phone']",
-    ]:
+    ]
+
+    for sel in selectors:
         try:
             page.wait_for_selector(sel, timeout=timeout_ms)
             return True
@@ -232,129 +287,153 @@ def _wait_for_detail_panel(page, timeout_ms=12000):
             continue
     return False
 
-def _accept_consent(page):
-    for sel in [
+
+def _accept_consent(page) -> None:
+    selectors = [
         "button:has-text('I agree')",
         "button:has-text('Accept all')",
         "button:has-text('Accept')",
-        "form [type='submit']:has-text('I agree')",
-    ]:
+        "button:has-text('同意')",
+        "#L2AGLb",  # common consent button id
+    ]
+
+    for sel in selectors:
         try:
             btn = page.locator(sel)
             if btn.count() > 0:
-                btn.first.click(timeout=3000)
+                btn.first.click(timeout=4000)
+                page.wait_for_timeout(600)
                 return
         except Exception:
             continue
 
-# - phase 1: collect card URLs by scrolling feed -
 
-def _collect_card_urls(feed, max_needed):
-    """
-    Scroll the results feed and harvest href links from cards.
-    Returns a deduplicated list of Maps place URLs.
-    Separating URL collection from data extraction avoids stale element refs.
-    """
-    urls = []
-    seen_urls = set()
+def _wait_for_feed(page, timeout_ms: int = 20000) -> bool:
+    try:
+        page.wait_for_selector("div[role='feed']", timeout=timeout_ms)
+        return True
+    except PlaywrightTimeoutError:
+        return False
+
+
+# ── Card URL collector ───────────────────────────────────────────────────────
+
+
+def _collect_card_urls(feed, max_needed: int) -> List[str]:
+    urls: List[str] = []
+    seen_urls: set = set()
     stale_rounds = 0
     last_count = 0
 
-    while len(urls) < max_needed * 2:  # collect extra to account for dupes/skips
-        cards = feed.locator("div[role='article'] a.hfpxzc")
-        count = cards.count()
-
-        for i in range(count):
-            try:
-                href = cards.nth(i).get_attribute("href") or ""
-                if href and href not in seen_urls and "/place/" in href:
-                    seen_urls.add(href)
-                    urls.append(href)
-            except Exception:
-                continue
-
-        if count == last_count:
-            stale_rounds += 1
-        else:
-            stale_rounds = 0
-        last_count = count
-
-        if stale_rounds >= 3:
-            break
-
+    while len(urls) < max_needed:
         try:
-            feed.evaluate("(el) => el.scrollBy(0, el.scrollHeight)")
+            cards = feed.locator("a[href*='/place/'], a[href*='1s0x']")
+            count = cards.count()
+
+            for i in range(count):
+                try:
+                    href = cards.nth(i).get_attribute("href") or ""
+                    if href and href not in seen_urls and "/place/" in href:
+                        seen_urls.add(href)
+                        urls.append(href)
+                        if len(urls) >= max_needed:
+                            return urls[:max_needed]
+                except Exception:
+                    continue
+
+            if count == last_count:
+                stale_rounds += 1
+            else:
+                stale_rounds = 0
+            last_count = count
+
+            if stale_rounds >= 4:
+                break
+
+            feed.evaluate("(el) => el.scrollBy(0, el.scrollHeight + 300)")
+            time.sleep(1.1 + random.uniform(0, 0.7))
+
         except Exception:
             break
-        time.sleep(1.0)
 
-    return urls
+    return urls[:max_needed]
 
-# - main scraper -
+
+# ── Main scraping function ───────────────────────────────────────────────────
+
 
 def scrape_google_maps(
-    query,
-    max_results=50,
-    headless=True,
-    slow_mo=0,
-    min_delay_s=1.0,
-    max_delay_s=2.5,
-    user_data_dir=None,
-    max_retries=2,
-    review_mode=False,
-):
-    results = []
-    seen = set()
+    query: str,
+    max_results: int = 50,
+    headless: bool = True,
+    slow_mo: int = 0,
+    min_delay_s: float = 1.0,
+    max_delay_s: float = 2.8,
+    user_data_dir: Optional[str] = None,
+    max_retries: int = 2,
+    review_mode: bool = False,
+) -> List[Dict]:
+    results: List[Dict] = []
+    seen: set = set()
 
     with sync_playwright() as p:
+        # Launch browser
         if user_data_dir:
             context = p.chromium.launch_persistent_context(
                 user_data_dir=user_data_dir,
                 headless=headless,
                 slow_mo=slow_mo,
-                args=["--disable-blink-features=AutomationControlled"],
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                ],
                 ignore_default_args=["--enable-automation"],
             )
         else:
             browser = p.chromium.launch(
                 headless=headless,
                 slow_mo=slow_mo,
-                args=["--disable-blink-features=AutomationControlled"],
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                ],
                 ignore_default_args=["--enable-automation"],
             )
             context = browser.new_context(
                 user_agent=(
-                    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
                     "AppleWebKit/537.36 (KHTML, like Gecko) "
-                    "Chrome/122.0.0.0 Safari/537.36"
-                )
+                    "Chrome/124.0.0.0 Safari/537.36"
+                ),
+                viewport={"width": 1280, "height": 900},
             )
 
         page = context.new_page()
         _hide_webdriver(page)
 
-        # - load search results -
-        search_url = f"https://www.google.com/maps/search/{query.replace(' ', '+')}?hl=en&gl=en"
+        # Load search results
+        search_url = f"https://www.google.com/maps/search/{query.replace(' ', '+')}?hl=en"
         loaded = False
 
         for attempt in range(1, max_retries + 2):
             page.goto(search_url, wait_until="domcontentloaded")
             _accept_consent(page)
+
             try:
-                page.wait_for_load_state("networkidle", timeout=12000)
+                page.wait_for_load_state("networkidle", timeout=15000)
             except Exception:
                 pass
-            try:
-                page.wait_for_selector("div[role='feed']", timeout=20000)
+
+            if _wait_for_feed(page):
                 loaded = True
                 break
-            except PlaywrightTimeoutError:
-                if attempt > max_retries:
-                    _debug_screenshot(page, "maps_no_feed")
-                    print(f"[maps] ERROR: feed not found for: {query}")
-                    context.close()
-                    return results
-                _human_delay(2.0, 4.0)
+
+            if attempt > max_retries:
+                _debug_screenshot(page, "maps_no_feed")
+                print(f"[maps] ERROR: feed not found after {attempt} tries")
+                break
+
+            _human_delay(2.5, 5.0)
 
         if not loaded:
             context.close()
@@ -362,78 +441,86 @@ def scrape_google_maps(
 
         feed = page.locator("div[role='feed']")
 
-        # - phase 1: scroll feed, collect all card URLs -
-        print(f"[maps] Scrolling feed to collect URLs (target: {max_results})...")
+        print(f"[maps] Collecting up to {max_results} card URLs...")
         card_urls = _collect_card_urls(feed, max_results)
-        print(f"[maps] Collected {len(card_urls)} URLs — visiting each listing...")
+        print(f"[maps] Found {len(card_urls)} unique place URLs")
 
-        # - phase 2: visit each URL, extract all fields -
-        for url in card_urls:
+        # ── Visit each place ────────────────────────────────────────────────
+        for idx, url in enumerate(card_urls, 1):
             if len(results) >= max_results:
                 break
 
             try:
-                page.goto(url, wait_until="domcontentloaded")
-            except Exception as e:
-                print(f"[maps] nav error: {e}")
-                continue
+                page.goto(url, wait_until="domcontentloaded", timeout=25000)
+                _human_delay(0.6, 1.4)
 
-            if not _wait_for_detail_panel(page, timeout_ms=12000):
-                _debug_screenshot(page, "maps_no_detail")
-                continue
-
-            _human_delay(0.3, 0.6)
-
-            name = _get_name(page)
-            if not name:
-                continue
-
-            category        = _get_category(page)
-            rating, reviews = _get_rating_reviews(page)
-            address         = _get_address(page)
-            phone           = _get_phone(page)
-            website         = _get_website(page)
-            maps_url        = page.url
-            email_panel     = _get_email_from_panel(page)
-
-            about_data  = _extract_about_tab(page)
-            email_maps  = about_data["email_maps"] or email_panel
-            hours       = about_data["hours"]
-
-            place_id = _get_place_id_from_url(maps_url) or _safe_hash("|".join([name, address]))
-            if place_id in seen:
-                continue
-            seen.add(place_id)
-
-            if review_mode:
-                print(f"[review] {name} | {category} | {address}")
-                inp = input("Enter to accept, 's' to skip: ").strip().lower()
-                if inp == "s":
+                if not _wait_for_detail_panel(page):
+                    _debug_screenshot(page, f"no_detail_{idx}")
                     continue
 
-            results.append({
-                "place_id":      place_id,
-                "name":          name,
-                "category":      category,
-                "rating":        rating,
-                "reviews_count": reviews,
-                "address":       address,
-                "phone":         phone,
-                "website":       website,
-                "email_maps":    email_maps,
-                "hours":         hours,
-                "maps_url":      maps_url,
-                "query":         query,
-                "collected_at":  datetime.utcnow().isoformat(),
-            })
+                name = _get_name(page)
+                if not name:
+                    continue
 
-            print(
-                f"[maps] {len(results):>3}. {name} | {category} | "
-                f"{phone or '-'} | {website or '-'} | {email_maps or '-'}"
-            )
-            _human_delay(min_delay_s, max_delay_s)
+                category = _get_category(page)
+                rating, reviews = _get_rating_reviews(page)
+                address = _get_address(page)
+                phone = _get_phone(page)
+                website = _get_website(page)
+                maps_url = page.url.strip()
+
+                email_panel = _get_email_from_panel(page)
+                about_data = _extract_about_tab(page)
+
+                email = about_data["email_maps"] or email_panel
+                hours = about_data["hours"]
+
+                place_id = _get_place_id_from_url(maps_url) or _safe_hash(f"{name}|{address}")
+                if place_id in seen:
+                    continue
+                seen.add(place_id)
+
+                if review_mode:
+                    print(f"\n[review {idx}/{max_results}] {name}")
+                    print(f"  {category or '?'}  |  {address or '?'}")
+                    print(f"  Phone: {phone or '-'}  |  Web: {website or '-'}")
+                    print(f"  Email: {email or '-'}")
+                    choice = input("  → Enter = accept, s = skip, q = quit: ").strip().lower()
+                    if choice in ("q", "quit"):
+                        break
+                    if choice == "s":
+                        continue
+
+                entry = {
+                    "place_id": place_id,
+                    "name": name,
+                    "category": category,
+                    "rating": rating,
+                    "reviews_count": reviews,
+                    "address": address,
+                    "phone": phone,
+                    "website": website,
+                    "email": email,
+                    "hours": hours,
+                    "maps_url": maps_url,
+                    "query": query,
+                    "collected_at": datetime.utcnow().isoformat(timespec="seconds"),
+                }
+
+                results.append(entry)
+
+                print(
+                    f"[maps] {len(results):>3}/{max_results:>3} | "
+                    f"{name[:48]:<48} | {phone or '-':<18} | {email or '-'}"
+                )
+
+                _human_delay(min_delay_s, max_delay_s)
+
+            except Exception as e:
+                print(f"[maps] Error processing {url} → {e.__class__.__name__}: {e}")
+                _debug_screenshot(page, f"error_{idx}")
 
         context.close()
 
-    print(f"[maps] Done. Collected {len(results)} leads.")
+    print(f"[maps] Finished — collected {len(results)} valid places.")
     return results
