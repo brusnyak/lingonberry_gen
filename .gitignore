@@ -19,6 +19,9 @@ data/leads.db
 data/leads.csv
 data/queries.txt
 data/debug/
+/data
+data/leads.db-shm
+data/leads.db-wal
 
 # Playwright browser profile (contains cookies/session data)
 data/playwright-profile/
