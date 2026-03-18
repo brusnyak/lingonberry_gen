@@ -1,10 +1,11 @@
 """
 Per-lead website intelligence layer.
 
-For each lead with a website, produces a structured brand profile:
+For each lead with a website, produces a structured brand profile + gap profile:
 - site_reachable, has_email, has_phone, has_socials
 - brand_summary: what the business actually does (from site content)
 - tech_stack: platform hints
+- gap_profile: structured detectable weaknesses (booking, portal, ecommerce, tracking, lead capture)
 - llm_eval: AI assessment of the lead quality, pain points, and a casual outreach angle
 
 This runs AFTER website scraping, BEFORE final validation status is set.
@@ -20,12 +21,119 @@ import requests
 
 
 # ---------------------------------------------------------------------------
+# Gap detection — rule-based, no LLM needed
+# ---------------------------------------------------------------------------
+
+# Booking widget signals
+_BOOKING_SIGNALS = [
+    "calendly.com", "doctolib", "simplybook", "fresha.com", "booksy",
+    "zocdoc", "practo", "setmore", "acuityscheduling", "square appointments",
+    "/booking", "/rezervacia", "/rezervovat", "/termin", "/appointment",
+    "book-online", "book an appointment", "online booking", "buchen sie",
+    "jetzt buchen", "termin buchen", "objednat se", "rezervace online",
+]
+
+# Client portal signals (accounting / professional services)
+_PORTAL_SIGNALS = [
+    "/login", "/portal", "/client-area", "/client-portal", "/secure",
+    "/moje", "/klient", "/kundenportal",
+    "taxdome", "karbon", "canopy", "onvio", "suralink",
+    "sharepoint", "google drive", "dropbox business",
+]
+
+# E-commerce signals
+_ECOMMERCE_SIGNALS = [
+    "/cart", "/shop", "/store", "/eshop", "/obchod",
+    "add to cart", "add to basket", "buy now", "checkout",
+    "woocommerce", "shopify", "prestashop", "magento", "opencart",
+]
+
+# Analytics / tracking signals
+_TRACKING_SIGNALS = [
+    "google-analytics", "googletagmanager", "gtag(", "ga(", "_gaq",
+    "fbq(", "facebook pixel", "hotjar", "clarity.ms",
+    "segment.com", "mixpanel",
+]
+
+# Lead capture signals
+_LEAD_CAPTURE_SIGNALS = [
+    "<form", "contact-form", "contactform", "wpcf7", "gravityforms",
+    "hubspot-form", "typeform", "jotform",
+    "get in touch", "send us a message", "request a quote",
+    "free consultation", "book a call", "schedule a call",
+]
+
+
+def detect_gaps(html: str, links: dict) -> dict:
+    """
+    Detect presence/absence of key digital capabilities from raw HTML.
+    Returns a gap_profile dict.
+    """
+    html_lower = html.lower()
+
+    has_booking      = any(s in html_lower for s in _BOOKING_SIGNALS)
+    has_portal       = any(s in html_lower for s in _PORTAL_SIGNALS)
+    has_ecommerce    = any(s in html_lower for s in _ECOMMERCE_SIGNALS)
+    has_tracking     = any(s in html_lower for s in _TRACKING_SIGNALS)
+    has_lead_capture = any(s in html_lower for s in _LEAD_CAPTURE_SIGNALS)
+
+    # Also check sub-page links for booking/portal hints
+    all_links = " ".join(links.values()).lower()
+    if not has_booking:
+        has_booking = any(s in all_links for s in ["/booking", "/termin", "/appointment", "/rezervacia"])
+    if not has_portal:
+        has_portal = any(s in all_links for s in ["/login", "/portal", "/client"])
+
+    detected_gaps = []
+    if not has_booking:
+        detected_gaps.append("no_booking")
+    if not has_portal:
+        detected_gaps.append("no_client_portal")
+    if not has_ecommerce:
+        detected_gaps.append("no_ecommerce")
+    if not has_tracking:
+        detected_gaps.append("no_tracking")
+    if not has_lead_capture:
+        detected_gaps.append("no_lead_capture")
+
+    return {
+        "has_booking":       has_booking,
+        "has_client_portal": has_portal,
+        "has_ecommerce":     has_ecommerce,
+        "has_tracking":      has_tracking,
+        "has_lead_capture":  has_lead_capture,
+        "detected_gaps":     detected_gaps,
+    }
+
+
+def detect_language(text: str) -> str:
+    """Detect language of website content. Returns ISO 639-1 code or 'unknown'."""
+    if not text or len(text.strip()) < 50:
+        return "unknown"
+    try:
+        from langdetect import detect
+        return detect(text[:2000])
+    except Exception:
+        pass
+    # Lightweight fallback: count common stopwords
+    sample = text.lower()
+    scores = {
+        "de": sum(sample.count(w) for w in [" die ", " der ", " und ", " ist ", " mit ", " für "]),
+        "sk": sum(sample.count(w) for w in [" pre ", " nie ", " ako ", " ale ", " pri ", " som "]),
+        "cs": sum(sample.count(w) for w in [" pro ", " ale ", " jak ", " nebo ", " jsou ", " jsme "]),
+        "en": sum(sample.count(w) for w in [" the ", " and ", " for ", " with ", " our ", " you "]),
+    }
+    best = max(scores, key=scores.get)
+    return best if scores[best] > 2 else "unknown"
+
+
+# ---------------------------------------------------------------------------
 # LLM brand evaluation
 # ---------------------------------------------------------------------------
 
 _EVAL_SYSTEM = (
     "You are a sharp B2B sales researcher. "
-    "Given a business's website content, write a concise brand profile and evaluate them as a potential client. "
+    "Given a business's website content and detected gaps, write a concise brand profile and evaluate them as a potential client. "
     "Return ONLY valid JSON."
 )
 
@@ -34,7 +142,7 @@ _EVAL_SCHEMA = """{
   "apparent_size": "solo | small (2-10) | medium (10-50) | large (50+) | unknown",
   "digital_maturity": "low | medium | high",
   "pain_point_guess": "most likely pain point or gap you can spot from their site",
-  "outreach_angle": "one specific, non-generic hook for a first message — reference something real from their site",
+  "outreach_angle": "one specific, non-generic opening line referencing a real gap or detail from their site — not a generic pitch",
   "qualification": "strong | moderate | weak | skip",
   "qualification_reason": "one sentence why"
 }"""
@@ -48,11 +156,16 @@ def _llm_eval(lead: dict) -> Optional[dict]:
     services = (lead.get("services_text") or "")[:1000]
     tech = lead.get("tech_stack", "")
     socials = lead.get("socials", "")
+    gap_profile = lead.get("_gap_profile", {})
+    detected_gaps = gap_profile.get("detected_gaps", [])
+    language = lead.get("_language", "unknown")
 
     prompt = f"""Business: {name}
 Category: {category}
 Tech stack: {tech}
 Social profiles found: {socials}
+Website language: {language}
+Detected gaps (missing capabilities): {', '.join(detected_gaps) if detected_gaps else 'none detected'}
 
 --- About page ---
 {about}
@@ -147,7 +260,7 @@ def _parse_eval(text: str) -> Optional[dict]:
 def build_website_intel(lead: dict, use_ai: bool = True) -> dict:
     """
     Takes a lead dict (already has website scrape data merged in).
-    Returns an intel dict with structured fields.
+    Returns an intel dict with structured fields including gap_profile.
     """
     intel = {
         "site_reachable": False,
@@ -162,6 +275,15 @@ def build_website_intel(lead: dict, use_ai: bool = True) -> dict:
         "outreach_angle": "",
         "qualification": "unknown",
         "qualification_reason": "",
+        # Gap profile
+        "has_booking": False,
+        "has_client_portal": False,
+        "has_ecommerce": False,
+        "has_tracking": False,
+        "has_lead_capture": False,
+        "gap_profile": "{}",
+        "top_gap": "",
+        "language": "unknown",
     }
 
     # Site reachability (from scrape result)
@@ -180,7 +302,7 @@ def build_website_intel(lead: dict, use_ai: bool = True) -> dict:
 
     intel["has_email"] = bool(emails.strip())
     intel["has_phone"] = bool(phones.strip())
-    intel["has_socials"] = bool(socials.strip() and socials != "{}")
+    intel["has_socials"] = bool(socials.strip() and socials not in ("{}", ""))
 
     # No content at all — weak signal
     about = (lead.get("about_text") or "").strip()
@@ -189,6 +311,43 @@ def build_website_intel(lead: dict, use_ai: bool = True) -> dict:
         intel["qualification"] = "weak"
         intel["qualification_reason"] = "site reachable but no readable content"
         return intel
+
+    # --- Language detection ---
+    intel["language"] = detect_language(about or services)
+
+    # --- Gap detection (rule-based, fast) ---
+    # We need the raw HTML — use about+services text as proxy if raw HTML not available
+    raw_html = lead.get("_raw_html", about + " " + services)
+    candidate_links = lead.get("_candidate_links", {})
+    gap_profile = detect_gaps(raw_html, candidate_links)
+
+    intel["has_booking"]       = gap_profile["has_booking"]
+    intel["has_client_portal"] = gap_profile["has_client_portal"]
+    intel["has_ecommerce"]     = gap_profile["has_ecommerce"]
+    intel["has_tracking"]      = gap_profile["has_tracking"]
+    intel["has_lead_capture"]  = gap_profile["has_lead_capture"]
+
+    # Determine top_gap — priority order varies by category
+    category = (lead.get("category") or "").lower()
+    gap_priority = []
+    if any(k in category for k in ["dental", "dentist", "medical", "clinic", "doctor", "physio", "barber", "salon", "beauty"]):
+        gap_priority = ["no_booking", "no_lead_capture", "no_tracking"]
+    elif any(k in category for k in ["real estate", "realtor", "property", "immobilien"]):
+        gap_priority = ["no_lead_capture", "no_tracking", "no_booking"]
+    elif any(k in category for k in ["account", "tax", "bookkeep", "steuer", "ucto"]):
+        gap_priority = ["no_client_portal", "no_lead_capture", "no_tracking"]
+    else:
+        gap_priority = ["no_booking", "no_lead_capture", "no_client_portal", "no_ecommerce", "no_tracking"]
+
+    detected = gap_profile["detected_gaps"]
+    top_gap = next((g for g in gap_priority if g in detected), detected[0] if detected else "")
+    intel["top_gap"] = top_gap
+    gap_profile["top_gap"] = top_gap
+    intel["gap_profile"] = json.dumps(gap_profile)
+
+    # Inject gap info for LLM
+    lead["_gap_profile"] = gap_profile
+    lead["_language"] = intel["language"]
 
     # AI evaluation
     if use_ai:
@@ -204,33 +363,21 @@ def build_website_intel(lead: dict, use_ai: bool = True) -> dict:
                 "qualification_reason": eval_result.get("qualification_reason", ""),
             })
         else:
-            # Rule-based fallback
-            score = 0
-            if intel["has_email"]:
-                score += 2
-            if intel["has_phone"]:
-                score += 1
-            if intel["has_socials"]:
-                score += 1
-            if len(about) > 300:
-                score += 1
-            intel["qualification"] = "strong" if score >= 4 else "moderate" if score >= 2 else "weak"
-            intel["qualification_reason"] = "rule-based: ai unavailable"
+            intel.update(_rule_based_qual(intel))
     else:
-        # Rule-based only
-        score = 0
-        if intel["has_email"]:
-            score += 2
-        if intel["has_phone"]:
-            score += 1
-        if intel["has_socials"]:
-            score += 1
-        if len(about) > 300:
-            score += 1
-        intel["qualification"] = "strong" if score >= 4 else "moderate" if score >= 2 else "weak"
-        intel["qualification_reason"] = "rule-based"
+        intel.update(_rule_based_qual(intel))
 
     return intel
+
+
+def _rule_based_qual(intel: dict) -> dict:
+    score = 0
+    if intel["has_email"]:      score += 2
+    if intel["has_phone"]:      score += 1
+    if intel["has_socials"]:    score += 1
+    if intel["has_lead_capture"]: score += 1
+    qual = "strong" if score >= 4 else "moderate" if score >= 2 else "weak"
+    return {"qualification": qual, "qualification_reason": "rule-based: ai unavailable"}
 
 
 # ---------------------------------------------------------------------------
@@ -277,6 +424,9 @@ def run_website_intel(conn: sqlite3.Connection, use_ai: bool = True, only_missin
                 brand_summary=?, apparent_size=?, digital_maturity=?,
                 pain_point_guess=?, outreach_angle=?,
                 site_qualification=?, site_qual_reason=?,
+                has_booking=?, has_client_portal=?, has_ecommerce=?,
+                has_tracking=?, has_lead_capture=?,
+                gap_profile=?, top_gap=?,
                 site_intel_done=1
                WHERE id=?""",
             (
@@ -291,9 +441,23 @@ def run_website_intel(conn: sqlite3.Connection, use_ai: bool = True, only_missin
                 intel["outreach_angle"],
                 intel["qualification"],
                 intel["qualification_reason"],
+                int(intel["has_booking"]),
+                int(intel["has_client_portal"]),
+                int(intel["has_ecommerce"]),
+                int(intel["has_tracking"]),
+                int(intel["has_lead_capture"]),
+                intel["gap_profile"],
+                intel["top_gap"],
                 lead["id"],
             ),
         )
+
+        # Also update language on website_data row
+        if intel.get("language") and intel["language"] != "unknown":
+            conn.execute(
+                "UPDATE website_data SET language=? WHERE business_id=?",
+                (intel["language"], lead["id"]),
+            )
 
     conn.commit()
     return counts
@@ -315,6 +479,14 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         ("site_qualification","TEXT"),
         ("site_qual_reason",  "TEXT"),
         ("site_intel_done",   "INTEGER DEFAULT 0"),
+        # Gap profile
+        ("has_booking",       "INTEGER DEFAULT 0"),
+        ("has_client_portal", "INTEGER DEFAULT 0"),
+        ("has_ecommerce",     "INTEGER DEFAULT 0"),
+        ("has_tracking",      "INTEGER DEFAULT 0"),
+        ("has_lead_capture",  "INTEGER DEFAULT 0"),
+        ("gap_profile",       "TEXT"),
+        ("top_gap",           "TEXT"),
     ]
     for col, typedef in new_cols:
         if col not in existing:

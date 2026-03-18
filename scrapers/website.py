@@ -7,6 +7,7 @@ Website scraper — upgraded with:
 - structured return with site_status field
 """
 
+import json
 import re
 import socket
 import time
@@ -284,7 +285,10 @@ def scrape_site(url: str, sleep_s: float = 0.8) -> Dict:
         "services_text": services_text[:2000],
         "emails":        ",".join(clean_emails[:8]),
         "phones":        ",".join(dict.fromkeys(phones))[:500],
-        "socials":       str(socials) if socials else "",
+        "socials":       json.dumps(socials) if socials else "{}",
+        "instagram_url": socials.get("instagram", ""),
+        "facebook_url":  socials.get("facebook", ""),
+        "linkedin_url":  socials.get("linkedin", ""),
         "tech_stack":    ",".join(tech),
     })
     return result

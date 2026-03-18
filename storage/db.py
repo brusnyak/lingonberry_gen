@@ -100,13 +100,31 @@ def init_db(conn: sqlite3.Connection) -> None:
 
     wcols = {row["name"] for row in conn.execute("PRAGMA table_info(website_data)").fetchall()}
     for col, typedef in [
-        ("site_status", "TEXT"),
-        ("site_error",  "TEXT"),
-        ("socials",     "TEXT"),
-        ("tech_stack",  "TEXT"),
+        ("site_status",    "TEXT"),
+        ("site_error",     "TEXT"),
+        ("socials",        "TEXT"),   # JSON dict of all found social links
+        ("tech_stack",     "TEXT"),
+        ("instagram_url",  "TEXT"),
+        ("facebook_url",   "TEXT"),
+        ("linkedin_url",   "TEXT"),
+        ("language",       "TEXT"),   # detected language code e.g. 'en', 'de', 'sk'
     ]:
         if col not in wcols:
             conn.execute(f"ALTER TABLE website_data ADD COLUMN {col} {typedef}")
+
+    # Gap profile columns on businesses table
+    bcols = {row["name"] for row in conn.execute("PRAGMA table_info(businesses)").fetchall()}
+    for col, typedef in [
+        ("has_booking",       "INTEGER DEFAULT 0"),
+        ("has_client_portal", "INTEGER DEFAULT 0"),
+        ("has_ecommerce",     "INTEGER DEFAULT 0"),
+        ("has_tracking",      "INTEGER DEFAULT 0"),
+        ("has_lead_capture",  "INTEGER DEFAULT 0"),
+        ("gap_profile",       "TEXT"),   # JSON
+        ("top_gap",           "TEXT"),
+    ]:
+        if col not in bcols:
+            conn.execute(f"ALTER TABLE businesses ADD COLUMN {col} {typedef}")
 
     conn.commit()
 
@@ -161,22 +179,28 @@ def insert_website_data(conn: sqlite3.Connection, business_id: int, data: Dict[s
     conn.execute(
         """
         INSERT INTO website_data (business_id, site_url, site_status, site_error,
-            about_text, services_text, emails, phones, socials, tech_stack, collected_at)
+            about_text, services_text, emails, phones, socials, tech_stack, collected_at,
+            instagram_url, facebook_url, linkedin_url, language)
         VALUES (:business_id, :site_url, :site_status, :site_error,
-            :about_text, :services_text, :emails, :phones, :socials, :tech_stack, :collected_at)
+            :about_text, :services_text, :emails, :phones, :socials, :tech_stack, :collected_at,
+            :instagram_url, :facebook_url, :linkedin_url, :language)
         """,
         {
-            "business_id": business_id,
-            "site_url":    data.get("site_url", ""),
-            "site_status": data.get("site_status", ""),
-            "site_error":  data.get("site_error", ""),
-            "about_text":  data.get("about_text", ""),
+            "business_id":   business_id,
+            "site_url":      data.get("site_url", ""),
+            "site_status":   data.get("site_status", ""),
+            "site_error":    data.get("site_error", ""),
+            "about_text":    data.get("about_text", ""),
             "services_text": data.get("services_text", ""),
-            "emails":      data.get("emails", ""),
-            "phones":      data.get("phones", ""),
-            "socials":     data.get("socials", ""),
-            "tech_stack":  data.get("tech_stack", ""),
-            "collected_at": data.get("collected_at", ""),
+            "emails":        data.get("emails", ""),
+            "phones":        data.get("phones", ""),
+            "socials":       data.get("socials", ""),   # JSON string
+            "tech_stack":    data.get("tech_stack", ""),
+            "collected_at":  data.get("collected_at", ""),
+            "instagram_url": data.get("instagram_url", ""),
+            "facebook_url":  data.get("facebook_url", ""),
+            "linkedin_url":  data.get("linkedin_url", ""),
+            "language":      data.get("language", ""),
         },
     )
     conn.commit()
