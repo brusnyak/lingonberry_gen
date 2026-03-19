@@ -23,7 +23,9 @@ CREATE TABLE IF NOT EXISTS businesses (
     score REAL,
     score_reason TEXT,
     validation_status TEXT DEFAULT 'pending',
-    validation_notes TEXT
+    validation_notes TEXT,
+    target_niche TEXT,
+    niche_confidence REAL
 );
 
 CREATE TABLE IF NOT EXISTS website_data (
@@ -63,6 +65,99 @@ CREATE TABLE IF NOT EXISTS query_runs (
     collected_count INTEGER,
     created_at TEXT
 );
+
+CREATE TABLE IF NOT EXISTS niche_research (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    niche TEXT NOT NULL UNIQUE,
+    sample_market TEXT,
+    common_pains TEXT,
+    pain_detectability REAL,
+    contactability REAL,
+    ability_to_deliver REAL,
+    price_tolerance REAL,
+    content_leverage REAL,
+    outreach_channel_fit TEXT,
+    repo_evidence TEXT,
+    external_evidence TEXT,
+    notes TEXT,
+    score REAL,
+    status TEXT DEFAULT 'candidate',
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS niche_validation (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    niche TEXT NOT NULL UNIQUE,
+    leads_count INTEGER DEFAULT 0,
+    qualified_count INTEGER DEFAULT 0,
+    contacted_count INTEGER DEFAULT 0,
+    replies_count INTEGER DEFAULT 0,
+    interested_count INTEGER DEFAULT 0,
+    discovery_calls INTEGER DEFAULT 0,
+    pain_severity REAL,
+    delivery_fit REAL,
+    pricing_potential REAL,
+    notes TEXT,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS lead_reviews (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    lead_id INTEGER NOT NULL UNIQUE,
+    target_niche TEXT,
+    actual_business_model TEXT,
+    actual_pains TEXT,
+    email_fit TEXT,
+    social_fit TEXT,
+    form_fit TEXT,
+    hybrid_fit TEXT,
+    recommended_channel TEXT,
+    recommended_angle TEXT,
+    notes TEXT,
+    reviewer TEXT,
+    reviewed_at TEXT NOT NULL,
+    FOREIGN KEY (lead_id) REFERENCES businesses(id)
+);
+
+CREATE TABLE IF NOT EXISTS niche_findings (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    niche TEXT NOT NULL,
+    source_type TEXT NOT NULL,
+    source_query TEXT,
+    source_title TEXT,
+    source_url TEXT,
+    market TEXT,
+    pain_point TEXT,
+    opportunity_type TEXT,
+    summary TEXT NOT NULL,
+    suggested_offer TEXT,
+    suggested_channel TEXT,
+    monetization_path TEXT,
+    evidence_strength REAL,
+    confidence REAL,
+    tags TEXT,
+    created_by TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS pain_library (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    niche TEXT NOT NULL,
+    pain_key TEXT NOT NULL,
+    pain_label TEXT NOT NULL,
+    description TEXT,
+    evidence_summary TEXT,
+    evidence_types TEXT,
+    safe_outreach_claim TEXT,
+    unsafe_outreach_claim TEXT,
+    offer_angles TEXT,
+    best_channels TEXT,
+    confidence REAL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL,
+    UNIQUE(niche, pain_key)
+);
 """
 
 
@@ -86,6 +181,8 @@ def init_db(conn: sqlite3.Connection) -> None:
         ("hours", "TEXT"),
         ("validation_status", "TEXT DEFAULT 'pending'"),
         ("validation_notes", "TEXT"),
+        ("target_niche", "TEXT"),
+        ("niche_confidence", "REAL"),
     ]:
         if col not in cols:
             conn.execute(f"ALTER TABLE businesses ADD COLUMN {col} {typedef}")
@@ -122,9 +219,53 @@ def init_db(conn: sqlite3.Connection) -> None:
         ("has_lead_capture",  "INTEGER DEFAULT 0"),
         ("gap_profile",       "TEXT"),   # JSON
         ("top_gap",           "TEXT"),
+        ("opportunity_profile","TEXT"),  # JSON
+        ("top_opportunity",   "TEXT"),
     ]:
         if col not in bcols:
             conn.execute(f"ALTER TABLE businesses ADD COLUMN {col} {typedef}")
+
+    try:
+        from leadgen.niches import (
+            ensure_niche_research_seed,
+            refresh_business_niches,
+            refresh_niche_scores,
+            refresh_niche_validation,
+        )
+    except ImportError:
+        from niches import (  # type: ignore
+            ensure_niche_research_seed,
+            refresh_business_niches,
+            refresh_niche_scores,
+            refresh_niche_validation,
+        )
+
+    ensure_niche_research_seed(conn)
+    refresh_business_niches(conn)
+    refresh_niche_scores(conn)
+    refresh_niche_validation(conn)
+
+    fcols = {row["name"] for row in conn.execute("PRAGMA table_info(niche_findings)").fetchall()}
+    for col, typedef in [
+        ("opportunity_type", "TEXT"),
+        ("monetization_path", "TEXT"),
+        ("evidence_strength", "REAL"),
+    ]:
+        if col not in fcols:
+            conn.execute(f"ALTER TABLE niche_findings ADD COLUMN {col} {typedef}")
+
+    pcols = {row["name"] for row in conn.execute("PRAGMA table_info(pain_library)").fetchall()}
+    for col, typedef in [
+        ("evidence_summary", "TEXT"),
+        ("evidence_types", "TEXT"),
+        ("safe_outreach_claim", "TEXT"),
+        ("unsafe_outreach_claim", "TEXT"),
+        ("offer_angles", "TEXT"),
+        ("best_channels", "TEXT"),
+        ("confidence", "REAL"),
+    ]:
+        if col not in pcols:
+            conn.execute(f"ALTER TABLE pain_library ADD COLUMN {col} {typedef}")
 
     conn.commit()
 

@@ -19,6 +19,11 @@ from typing import Optional
 
 import requests
 
+try:
+    from leadgen.niches import infer_niche
+except ImportError:
+    from niches import infer_niche  # type: ignore
+
 
 # ---------------------------------------------------------------------------
 # Gap detection — rule-based, no LLM needed
@@ -31,6 +36,8 @@ _BOOKING_SIGNALS = [
     "/booking", "/rezervacia", "/rezervovat", "/termin", "/appointment",
     "book-online", "book an appointment", "online booking", "buchen sie",
     "jetzt buchen", "termin buchen", "objednat se", "rezervace online",
+    "objednať", "objednat", "objednať sa", "objednat se", "objednajte sa",
+    "rezervovať", "rezervovat", "rezervácia", "rezervace", "book now",
 ]
 
 # Client portal signals (accounting / professional services)
@@ -61,10 +68,71 @@ _LEAD_CAPTURE_SIGNALS = [
     "hubspot-form", "typeform", "jotform",
     "get in touch", "send us a message", "request a quote",
     "free consultation", "book a call", "schedule a call",
+    "kontakt", "kontaktujte", "napíšte nám", "napiste nam",
+    "objednať sa", "objednat se", "rezervácia", "rezervace",
+]
+
+_DENTAL_STRONG_RE = re.compile(
+    r"\b(dental|dentist|zahnarzt|stomatolog|stomatol[oó]g|orthodont|implantolog|implant)\b",
+    re.IGNORECASE,
+)
+_DENTAL_LOCAL_RE = re.compile(
+    r"\b(zubn[aá]|zubn[eé]|zuby|zubar|zuba[rř]|dent[aá]lna hygiena|dent[aá]lne centrum|stroj[čc]ek)\b",
+    re.IGNORECASE,
+)
+_NON_DENTAL_RE = re.compile(
+    r"\b(account|accounting|účt|uct|tax|audit|finance|financ|marketing|agent[uú]ra|agency|consult|consulting|advisory|media)\b",
+    re.IGNORECASE,
+)
+
+_DENTAL_OPPORTUNITY_RULES = [
+    (
+        "high_value_case_followup",
+        [
+            "implant", "implanto", "all on 4", "all-on-4", "all on 6",
+            "veneer", "fazet", "korunk", "crown", "protet", "invisalign",
+            "aligner", "strojček", "orthodont", "esthetic", "estetick",
+        ],
+        "High-value treatments are visible on the site, which usually means enquiry follow-up speed and nurture matter.",
+        "I noticed you handle higher-value treatments like implants/esthetic work, so I was curious how follow-up is handled after an enquiry comes in.",
+    ),
+    (
+        "hygiene_recall",
+        [
+            "dentálna hygiena", "dental hygiene", "preventívna prehliadka",
+            "preventive", "recall", "profylax", "hygiena",
+        ],
+        "Recall-driven services are visible, which creates a strong case for reminder and reactivation flows.",
+        "I noticed dentálna hygiena / preventive care is a visible part of the clinic, so I was curious how recalls and repeat reminders are handled now.",
+    ),
+    (
+        "emergency_intake",
+        [
+            "pohotovosť", "emergency", "urgent", "same day", "sobota na objednávku",
+        ],
+        "Emergency or urgent care is mentioned, which usually creates phone-heavy intake and missed-call risk.",
+        "I noticed emergency / urgent care is part of the offer, so I was curious how after-hours or missed-call intake is handled right now.",
+    ),
+    (
+        "multilingual_patient_flow",
+        [
+            " sk en ", " sk de ", " english", " deutsch", "eng de", "en de",
+        ],
+        "Multiple language cues appear on the site, which often means more intake friction across channels and forms.",
+        "I noticed the site appears to serve patients in multiple languages, so I was curious how enquiries are handled when they come in across different channels.",
+    ),
+    (
+        "review_capture",
+        [
+            "recenzie", "reviews", "testimonial", "príbehy", "before and after", "pred a po",
+        ],
+        "The clinic already leans on proof and testimonials, which creates an opening around review capture and follow-up.",
+        "I noticed reviews / patient results are an important part of the site, so I was curious how you currently ask happy patients for new reviews.",
+    ),
 ]
 
 
-def detect_gaps(html: str, links: dict) -> dict:
+def detect_gaps(html: str, links: dict, allow_negative_inference: bool = False) -> dict:
     """
     Detect presence/absence of key digital capabilities from raw HTML.
     Returns a gap_profile dict.
@@ -85,16 +153,17 @@ def detect_gaps(html: str, links: dict) -> dict:
         has_portal = any(s in all_links for s in ["/login", "/portal", "/client"])
 
     detected_gaps = []
-    if not has_booking:
-        detected_gaps.append("no_booking")
-    if not has_portal:
-        detected_gaps.append("no_client_portal")
-    if not has_ecommerce:
-        detected_gaps.append("no_ecommerce")
-    if not has_tracking:
-        detected_gaps.append("no_tracking")
-    if not has_lead_capture:
-        detected_gaps.append("no_lead_capture")
+    if allow_negative_inference:
+        if not has_booking:
+            detected_gaps.append("no_booking")
+        if not has_portal:
+            detected_gaps.append("no_client_portal")
+        if not has_ecommerce:
+            detected_gaps.append("no_ecommerce")
+        if not has_tracking:
+            detected_gaps.append("no_tracking")
+        if not has_lead_capture:
+            detected_gaps.append("no_lead_capture")
 
     return {
         "has_booking":       has_booking,
@@ -103,6 +172,7 @@ def detect_gaps(html: str, links: dict) -> dict:
         "has_tracking":      has_tracking,
         "has_lead_capture":  has_lead_capture,
         "detected_gaps":     detected_gaps,
+        "negative_inference_used": allow_negative_inference,
     }
 
 
@@ -125,6 +195,72 @@ def detect_language(text: str) -> str:
     }
     best = max(scores, key=scores.get)
     return best if scores[best] > 2 else "unknown"
+
+
+def _is_dental_lead(lead: dict) -> bool:
+    identity_text = " ".join(
+        str(lead.get(key, "") or "")
+        for key in ("name", "website", "category")
+    )
+    content_text = " ".join(
+        str(lead.get(key, "") or "")
+        for key in ("about_text", "services_text")
+    )
+    if _DENTAL_STRONG_RE.search(identity_text) or _DENTAL_LOCAL_RE.search(identity_text):
+        return True
+    if _NON_DENTAL_RE.search(identity_text):
+        return False
+    if _DENTAL_STRONG_RE.search(content_text) and (
+        "clinic" in identity_text.lower() or "smile" in identity_text.lower() or "dent" in identity_text.lower()
+    ):
+        return True
+    if _DENTAL_LOCAL_RE.search(content_text) and "zub" in content_text.lower():
+        return True
+    return False
+
+
+def build_dental_opportunity_profile(lead: dict, intel: dict) -> dict:
+    text = " ".join([
+        str(lead.get("name", "") or ""),
+        str(lead.get("about_text", "") or ""),
+        str(lead.get("services_text", "") or ""),
+        str(lead.get("website", "") or ""),
+    ]).lower()
+
+    opportunities = []
+    for code, signals, pain_point, outreach_angle in _DENTAL_OPPORTUNITY_RULES:
+        if any(signal in text for signal in signals):
+            opportunities.append({
+                "type": code,
+                "pain_point": pain_point,
+                "outreach_angle": outreach_angle,
+            })
+
+    # Strong positive evidence from the site itself.
+    multi_location_markers = sum(text.count(city) for city in ["bratislava", "košice", "kosice", "žilina", "zilina", "piešťany", "piestany", "vienna", "praha", "prague"])
+    if multi_location_markers >= 2:
+        opportunities.append({
+            "type": "multi_location_coordination",
+            "pain_point": "Multiple locations appear on the site, which often means fragmented call handling and follow-up.",
+            "outreach_angle": "I noticed the clinic appears to operate across multiple locations, so I was curious how enquiries and follow-up are coordinated between them.",
+        })
+
+    unique = []
+    seen = set()
+    for item in opportunities:
+        if item["type"] in seen:
+            continue
+        seen.add(item["type"])
+        unique.append(item)
+
+    top = unique[0]["type"] if unique else ""
+    top_angle = unique[0]["outreach_angle"] if unique else ""
+    return {
+        "is_dental": True,
+        "opportunities": unique,
+        "top_opportunity": top,
+        "outreach_angle": top_angle,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -284,6 +420,9 @@ def build_website_intel(lead: dict, use_ai: bool = True) -> dict:
         "gap_profile": "{}",
         "top_gap": "",
         "language": "unknown",
+        "opportunity_profile": "{}",
+        "top_opportunity": "",
+        "resolved_niche": "",
     }
 
     # Site reachability (from scrape result)
@@ -317,9 +456,11 @@ def build_website_intel(lead: dict, use_ai: bool = True) -> dict:
 
     # --- Gap detection (rule-based, fast) ---
     # We need the raw HTML — use about+services text as proxy if raw HTML not available
-    raw_html = lead.get("_raw_html", about + " " + services)
+    raw_html = lead.get("_raw_html")
     candidate_links = lead.get("_candidate_links", {})
-    gap_profile = detect_gaps(raw_html, candidate_links)
+    text_proxy = about + " " + services
+    has_raw_html = bool(raw_html and len(raw_html) > len(text_proxy))
+    gap_profile = detect_gaps(raw_html or text_proxy, candidate_links, allow_negative_inference=has_raw_html)
 
     intel["has_booking"]       = gap_profile["has_booking"]
     intel["has_client_portal"] = gap_profile["has_client_portal"]
@@ -327,23 +468,41 @@ def build_website_intel(lead: dict, use_ai: bool = True) -> dict:
     intel["has_tracking"]      = gap_profile["has_tracking"]
     intel["has_lead_capture"]  = gap_profile["has_lead_capture"]
 
-    # Determine top_gap — priority order varies by category
-    category = (lead.get("category") or "").lower()
-    gap_priority = []
-    if any(k in category for k in ["dental", "dentist", "medical", "clinic", "doctor", "physio", "barber", "salon", "beauty"]):
-        gap_priority = ["no_booking", "no_lead_capture", "no_tracking"]
-    elif any(k in category for k in ["real estate", "realtor", "property", "immobilien"]):
-        gap_priority = ["no_lead_capture", "no_tracking", "no_booking"]
-    elif any(k in category for k in ["account", "tax", "bookkeep", "steuer", "ucto"]):
-        gap_priority = ["no_client_portal", "no_lead_capture", "no_tracking"]
-    else:
-        gap_priority = ["no_booking", "no_lead_capture", "no_client_portal", "no_ecommerce", "no_tracking"]
+    resolved_niche = (lead.get("target_niche") or "").strip()
+    if not resolved_niche or resolved_niche == "unknown":
+        resolved_niche, _confidence = infer_niche(
+            str(lead.get("name", "") or ""),
+            str(lead.get("category", "") or ""),
+            str(lead.get("query", "") or ""),
+            str(lead.get("website", "") or ""),
+        )
+    intel["resolved_niche"] = resolved_niche
+
+    # Determine top_gap using canonical niche priority, not noisy category labels.
+    gap_priority = {
+        "dental_medical": ["no_booking", "no_lead_capture", "no_tracking"],
+        "beauty_salon": ["no_booking", "no_lead_capture", "no_tracking"],
+        "physiotherapy_wellness": ["no_booking", "no_lead_capture", "no_tracking"],
+        "real_estate": ["no_lead_capture", "no_tracking"],
+        "accounting_tax": ["no_client_portal", "no_lead_capture", "no_tracking"],
+        "home_services": ["no_lead_capture", "no_tracking"],
+        "local_retail_ecommerce": ["no_ecommerce", "no_tracking", "no_lead_capture"],
+        "hospitality_restaurants": ["no_lead_capture", "no_tracking", "no_booking"],
+    }.get(resolved_niche, ["no_lead_capture", "no_tracking", "no_client_portal", "no_ecommerce"])
 
     detected = gap_profile["detected_gaps"]
     top_gap = next((g for g in gap_priority if g in detected), detected[0] if detected else "")
     intel["top_gap"] = top_gap
     gap_profile["top_gap"] = top_gap
     intel["gap_profile"] = json.dumps(gap_profile)
+
+    if _is_dental_lead(lead):
+        opp = build_dental_opportunity_profile(lead, intel)
+        intel["opportunity_profile"] = json.dumps(opp)
+        intel["top_opportunity"] = opp.get("top_opportunity", "")
+        # For dental, prefer specific opportunity-driven outreach over generic gap outreach.
+        if opp.get("outreach_angle"):
+            intel["outreach_angle"] = opp["outreach_angle"]
 
     # Inject gap info for LLM
     lead["_gap_profile"] = gap_profile
@@ -393,7 +552,7 @@ def run_website_intel(conn: sqlite3.Connection, use_ai: bool = True, only_missin
     _ensure_columns(conn)
 
     query = """
-        SELECT b.id, b.name, b.category, b.phone, b.website, b.email_maps,
+        SELECT b.id, b.name, b.category, b.phone, b.website, b.email_maps, b.query, b.target_niche,
                b.validation_status,
                w.about_text, w.services_text, w.emails, w.phones,
                w.site_url, w.socials, w.tech_stack, w.site_status, w.site_error
@@ -426,7 +585,7 @@ def run_website_intel(conn: sqlite3.Connection, use_ai: bool = True, only_missin
                 site_qualification=?, site_qual_reason=?,
                 has_booking=?, has_client_portal=?, has_ecommerce=?,
                 has_tracking=?, has_lead_capture=?,
-                gap_profile=?, top_gap=?,
+                gap_profile=?, top_gap=?, opportunity_profile=?, top_opportunity=?, target_niche=?,
                 site_intel_done=1
                WHERE id=?""",
             (
@@ -448,6 +607,9 @@ def run_website_intel(conn: sqlite3.Connection, use_ai: bool = True, only_missin
                 int(intel["has_lead_capture"]),
                 intel["gap_profile"],
                 intel["top_gap"],
+                intel.get("opportunity_profile", "{}"),
+                intel.get("top_opportunity", ""),
+                intel.get("resolved_niche") or lead.get("target_niche") or None,
                 lead["id"],
             ),
         )
@@ -487,6 +649,8 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         ("has_lead_capture",  "INTEGER DEFAULT 0"),
         ("gap_profile",       "TEXT"),
         ("top_gap",           "TEXT"),
+        ("opportunity_profile","TEXT"),
+        ("top_opportunity",   "TEXT"),
     ]
     for col, typedef in new_cols:
         if col not in existing:
