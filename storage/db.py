@@ -221,6 +221,14 @@ def init_db(conn: sqlite3.Connection) -> None:
         ("top_gap",           "TEXT"),
         ("opportunity_profile","TEXT"),  # JSON
         ("top_opportunity",   "TEXT"),
+        # Enrichment columns for personalized outreach
+        ("contact_name",      "TEXT"),   # first name of owner/contact
+        ("pain_point_guess",  "TEXT"),   # detected pain from reviews/website
+        ("outreach_angle",    "TEXT"),   # one sentence: what we'd do for them specifically
+        ("apparent_size",     "TEXT"),   # 1-person, small, medium
+        ("digital_maturity",  "TEXT"),   # none, basic, moderate, advanced
+        ("brand_summary",     "TEXT"),   # short description of what they do
+        ("pipeline_stage",    "TEXT DEFAULT 'lead'"),
     ]:
         if col not in bcols:
             conn.execute(f"ALTER TABLE businesses ADD COLUMN {col} {typedef}")

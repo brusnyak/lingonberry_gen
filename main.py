@@ -27,7 +27,11 @@ from storage.db import (
 )
 from scrapers.google_maps import scrape_google_maps
 from scrapers.website import scrape_site
+from scrapers.web_search import search_leads as ddg_search_leads, batch_search as ddg_batch_search
+from scrapers.hipages import scrape_hipages
+from scrapers.facebook import scrape_facebook
 from enrichment.ollama import enrich_business
+from enrichment.contact_enrichment import run_contact_enrichment
 from validation.validator import run_validation
 from validation.website_intel import run_website_intel, _ensure_columns as _ensure_intel_cols
 from concurrent.futures import ThreadPoolExecutor, as_completed
@@ -68,12 +72,18 @@ def main() -> None:
     parser.add_argument("--no-ai-validate", action="store_true", help="Use rule-based validation only (no LLM)")
     parser.add_argument("--site-intel", action="store_true", help="Run website intelligence layer (reachability + brand profile)")
     parser.add_argument("--site-intel-all", action="store_true", help="Re-run site intel on all leads (not just missing)")
+    # New source flags
+    parser.add_argument("--source", default="google_maps", choices=["google_maps", "hipages", "web_search", "facebook"], help="Lead source to scrape")
+    parser.add_argument("--trade", default="plumber", help="Trade key for hipages (plumber, electrician, hvac, locksmith...)")
+    parser.add_argument("--location", default="sydney", help="Location for hipages/web_search scraping")
+    parser.add_argument("--contact-enrich", action="store_true", help="Run contact+pain enrichment on qualified leads missing outreach_angle")
+    parser.add_argument("--contact-enrich-all", action="store_true", help="Re-run contact enrichment on all qualified leads")
     args = parser.parse_args()
 
     if not args.enrich_approved and not args.query and not args.queries_file \
             and not args.validate and not args.validate_all \
             and not args.site_intel and not args.site_intel_all:
-        raise SystemExit("Provide --query, --queries-file, --validate, --validate-all, --site-intel, or --site-intel-all")
+        raise SystemExit("Provide --query, --queries-file, --validate, --validate-all, --site-intel, --site-intel-all, --source hipages/web_search/facebook, or --contact-enrich")
 
     queries = []
     if args.query:
@@ -131,8 +141,109 @@ def main() -> None:
                     time.sleep(1.0)
         return result
 
+    # ── New source scrapers ────────────────────────────────────────────────────
+    if args.source == "hipages" and not args.enrich_approved:
+        from scrapers.queries import AU_HIPAGES_MATRIX
+        if args.query:
+            # --query "plumber sydney" style
+            parts = args.query.strip().split(None, 1)
+            trade, location = (parts[0], parts[1]) if len(parts) == 2 else (parts[0], "sydney")
+            hipages_jobs = [(trade, location)]
+        else:
+            hipages_jobs = [(args.trade, args.location)]
+
+        all_leads = []
+        for trade, location in hipages_jobs:
+            leads = scrape_hipages(trade, location, max_results=args.max, headless=args.headless)
+            all_leads.extend(leads)
+
+        print(f"[hipages] Total collected: {len(all_leads)}")
+        for lead in all_leads:
+            score, reason = score_lead(lead)
+            lead["score"] = score
+            lead["score_reason"] = reason
+            if args.auto_approve:
+                lead["approved"] = 1
+                lead["approved_at"] = datetime.utcnow().isoformat()
+            business_id = upsert_business(conn, lead)
+            # Store about_text in website_data if present
+            if lead.get("about_text"):
+                insert_website_data(conn, business_id, {
+                    "site_url": lead.get("website", ""),
+                    "site_status": "ok" if lead.get("website") else "",
+                    "about_text": lead.get("about_text", ""),
+                    "collected_at": lead["collected_at"],
+                })
+            # Store contact_name directly
+            if lead.get("contact_name"):
+                update_business(conn, business_id, {"contact_name": lead["contact_name"]})
+
+    elif args.source == "web_search" and not args.enrich_approved:
+        from scrapers.queries import WEB_SEARCH_MATRIX
+        if args.query:
+            web_queries = [(args.query, args.trade or "business")]
+        else:
+            from scrapers.queries import get_daily_queries
+            web_queries = get_daily_queries(n=args.max // 10 or 6, source="web_search")
+
+        all_leads = []
+        for query_str, category in web_queries:
+            leads = ddg_search_leads(query_str, max_results=15, category=category)
+            all_leads.extend(leads)
+
+        print(f"[web_search] Total collected: {len(all_leads)}")
+        with ThreadPoolExecutor(max_workers=args.workers) as ex:
+            futures = [ex.submit(scrape_and_enrich, lead) for lead in all_leads]
+            for i, fut in enumerate(as_completed(futures), start=1):
+                res = fut.result()
+                lead = res["lead"]
+                score, reason = score_lead(lead)
+                lead["score"] = score
+                lead["score_reason"] = reason
+                if args.auto_approve:
+                    lead["approved"] = 1
+                    lead["approved_at"] = datetime.utcnow().isoformat()
+                business_id = upsert_business(conn, lead)
+                if res["site"]:
+                    res["site"]["collected_at"] = datetime.utcnow().isoformat()
+                    insert_website_data(conn, business_id, res["site"])
+                if res["enriched"]:
+                    res["enriched"]["model"] = args.model
+                    res["enriched"]["created_at"] = datetime.utcnow().isoformat()
+                    insert_enrichment(conn, business_id, res["enriched"])
+                if i % 10 == 0:
+                    print(f"[web_search] {i}/{len(futures)} done")
+
+    elif args.source == "facebook" and not args.enrich_approved:
+        if args.query:
+            fb_jobs = [(args.query, args.trade or "business")]
+        else:
+            from scrapers.queries import get_daily_queries
+            fb_jobs = get_daily_queries(n=6, source="facebook")
+
+        all_leads = []
+        for query_str, category in fb_jobs:
+            leads = scrape_facebook(query_str, max_results=args.max, headless=args.headless, category=category)
+            all_leads.extend(leads)
+
+        print(f"[facebook] Total collected: {len(all_leads)}")
+        for lead in all_leads:
+            score, reason = score_lead(lead)
+            lead["score"] = score
+            lead["score_reason"] = reason
+            if args.auto_approve:
+                lead["approved"] = 1
+                lead["approved_at"] = datetime.utcnow().isoformat()
+            business_id = upsert_business(conn, lead)
+            if lead.get("about_text"):
+                insert_website_data(conn, business_id, {
+                    "site_url": lead.get("website", ""),
+                    "site_status": "ok" if lead.get("website") else "",
+                    "about_text": lead.get("about_text", ""),
+                    "collected_at": lead["collected_at"],
+                })
+
     if args.enrich_approved:
-        rows = list_approved_without_enrichment(conn)
         print(f"[enrich] Approved leads without enrichment: {len(rows)}")
         with ThreadPoolExecutor(max_workers=args.workers) as ex:
             futures = [ex.submit(scrape_and_enrich, dict(row)) for row in rows]
@@ -206,6 +317,12 @@ def main() -> None:
         print(f"[validate] Running validation (only_pending={only_pending}, use_ai={use_ai})")
         counts = run_validation(conn, use_ai=use_ai, only_pending=only_pending)
         print(f"[validate] Done — qualified={counts['qualified']} skip={counts['skip']} needs_review={counts['needs_review']} total={counts['total']}")
+
+    if args.contact_enrich or args.contact_enrich_all:
+        only_missing = not args.contact_enrich_all
+        print(f"[contact-enrich] Running contact+pain enrichment (only_missing={only_missing})")
+        counts = run_contact_enrichment(conn, limit=200, only_missing=only_missing)
+        print(f"[contact-enrich] Done — enriched={counts['enriched']} skipped={counts['skipped']} total={counts['total']}")
 
     export_csv(conn, args.csv)
     print(f"[done] Exported CSV to {args.csv}")
