@@ -14,6 +14,12 @@ import json
 import sqlite3
 from datetime import datetime
 from typing import Optional
+from pathlib import Path
+import sys
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from agent.remote_models import complete_text
 
 # ---------------------------------------------------------------------------
 # 1. Dedup helpers
@@ -141,8 +147,6 @@ def _ai_classify(lead: dict) -> dict:
     Returns {"status": ..., "reason": ...}
     Falls back to rule-based if LLM unavailable.
     """
-    import requests
-
     prompt = f"""You are a B2B lead qualification assistant.
 
 Given this business lead, classify it as one of:
@@ -166,39 +170,19 @@ ICP fit: {lead.get('icp_fit', '')}
 Pain points: {lead.get('pain_points', '')}
 """
 
-    # Try Ollama cloud first
-    ollama_url = os.environ.get("OLLAMA_BASE_URL", "").rstrip("/")
-    ollama_key = os.environ.get("OLLAMA_API_KEY", "")
-    if ollama_url and ollama_key:
+    if any(
+        os.environ.get(name)
+        for name in ("OPENROUTER_API_KEY", "GROQ_API_KEY", "GOOGLE_AI_STUDIO_API_KEY", "GOOGLE_AI_VICTOR_API_KEY")
+    ):
         try:
-            resp = requests.post(
-                f"{ollama_url}/api/chat",
-                headers={"Authorization": f"Bearer {ollama_key}", "Content-Type": "application/json"},
-                json={"model": "gemma3:4b", "messages": [{"role": "user", "content": prompt}], "stream": False},
-                timeout=15,
-            )
-            if resp.ok:
-                text = resp.json()["message"]["content"].strip()
-                return _parse_ai_response(text)
+            text = complete_text(
+                user_prompt=prompt,
+                temperature=0.2,
+                max_tokens=250,
+            ).strip()
+            return _parse_ai_response(text)
         except Exception:
             pass
-
-    # Fallback: OpenRouter
-    or_key = os.environ.get("OPENROUTER_API_KEY", "")
-    if or_key:
-        for model in ["meta-llama/llama-3.3-70b-instruct:free", "google/gemma-3-27b-it:free"]:
-            try:
-                resp = requests.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers={"Authorization": f"Bearer {or_key}", "Content-Type": "application/json"},
-                    json={"model": model, "messages": [{"role": "user", "content": prompt}]},
-                    timeout=20,
-                )
-                if resp.ok:
-                    text = resp.json()["choices"][0]["message"]["content"].strip()
-                    return _parse_ai_response(text)
-            except Exception:
-                continue
 
     # Rule-based fallback
     return _rule_based_classify(lead)

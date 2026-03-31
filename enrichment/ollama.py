@@ -1,16 +1,11 @@
 import json
 import os
-import time
+import sys
 from typing import Any, Dict, Iterable, List
 
-import requests
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "..")))
 
-OPENROUTER_FREE_MODELS = [
-    "mistralai/mistral-7b-instruct:free",
-    "google/gemma-2-9b-it:free",           # updated — gemma-3 doesn't exist yet
-    "meta-llama/llama-3.2-3b-instruct:free",
-    "qwen/qwen2.5-7b-instruct:free",       # usually very good & free
-]
+from agent.remote_models import complete_text
 
 SYSTEM_PROMPT = (
     "You are a B2B sales researcher helping a small agency find clients. "
@@ -90,111 +85,38 @@ def _parse_response(content: str) -> Dict[str, str]:
         return default
 
 
-def _enrich_ollama(
-    model: str,
-    business: Dict[str, Any],
-    timeout: int = 70,
-) -> Dict[str, str]:
-    base_url = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434").rstrip("/")
-
-    payload = {
-        "model": model,
-        "messages": [
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": _build_user_payload(business)},
-        ],
-        "stream": False,
-        "format": "json",
-        "options": {
-            "temperature": 0.15,
-            "top_p": 0.9,
-        },
-    }
-
-    try:
-        resp = requests.post(
-            f"{base_url}/api/chat",
-            json=payload,
-            timeout=timeout,
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        content = data.get("message", {}).get("content", "{}")
-        return _parse_response(content)
-    except requests.RequestException as e:
-        raise RuntimeError(f"Ollama request failed: {e}")
-
-
-def _enrich_openrouter(
+def _enrich_remote(
     business: Dict[str, Any],
     timeout: int = 50,
 ) -> Dict[str, str]:
-    api_key = os.getenv("OPENROUTER_API_KEY")
-    if not api_key:
-        raise RuntimeError("Environment variable OPENROUTER_API_KEY is not set")
-
-    headers = {
-        "Authorization": f"Bearer {api_key}",
-        "HTTP-Referer": "https://github.com/yourusername/leadgen",  # change to your repo if public
-        "X-Title": "Lead Enrichment Script",
-        "Content-Type": "application/json",
-    }
-
-    user_content = _build_user_payload(business)
-
-    for model in OPENROUTER_FREE_MODELS:
-        payload = {
-            "model": model,
-            "messages": [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": user_content},
-            ],
-            "temperature": 0.15,
-            "max_tokens": 400,
-        }
-
-        try:
-            resp = requests.post(
-                "https://openrouter.ai/api/v1/chat/completions",
-                headers=headers,
-                json=payload,
-                timeout=timeout,
-            )
-            resp.raise_for_status()
-            content = resp.json()["choices"][0]["message"]["content"]
-            return _parse_response(content)
-
-        except Exception as e:
-            print(f"[openrouter] Model {model} failed: {e.__class__.__name__}")
-            time.sleep(1.5)
-
-    raise RuntimeError("All OpenRouter free models failed")
+    del timeout  # request timeout is managed inside the shared provider client
+    content = complete_text(
+        system_prompt=SYSTEM_PROMPT,
+        user_prompt=_build_user_payload(business),
+        temperature=0.15,
+        max_tokens=400,
+    )
+    return _parse_response(content)
 
 
 def enrich_business(
     model: str,
     business: Dict[str, Any],
     timeout: int = 70,
-    prefer_ollama: bool = True,
+    prefer_ollama: bool = False,  # Changed default to False - use OpenRouter first
     fallback_to_openrouter: bool = True,
 ) -> Dict[str, str]:
     """
-    Enrich one business record with LLM classification & outreach message.
-    Tries Ollama first (if prefer_ollama=True), then OpenRouter.
+    Enrich one business record with remote providers only.
+    Legacy flags are kept for CLI compatibility.
     """
-    if prefer_ollama:
-        try:
-            return _enrich_ollama(model, business, timeout=timeout)
-        except Exception as e:
-            print(f"[enrich] Ollama failed for '{business.get('name', '?')}': {e}")
-            if not fallback_to_openrouter:
-                raise
-
     if fallback_to_openrouter:
         try:
-            return _enrich_openrouter(business, timeout=timeout)
+            return _enrich_remote(business, timeout=timeout)
         except Exception as e:
-            print(f"[enrich] OpenRouter also failed: {e}")
+            if prefer_ollama:
+                print("[enrich] prefer_ollama was requested but local inference is now disabled; using remote providers only.")
+            print(f"[enrich] Remote enrichment failed: {e}")
             raise
 
     raise RuntimeError("No enrichment backend succeeded")

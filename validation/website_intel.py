@@ -16,8 +16,12 @@ import os
 import re
 import sqlite3
 from typing import Optional
+from pathlib import Path
+import sys
 
-import requests
+sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
+
+from agent.remote_models import complete_text
 
 try:
     from leadgen.niches import infer_niche
@@ -312,65 +316,22 @@ Detected gaps (missing capabilities): {', '.join(detected_gaps) if detected_gaps
 Respond with this exact JSON schema:
 {_EVAL_SCHEMA}"""
 
-    # Try Ollama cloud
-    ollama_url = os.environ.get("OLLAMA_BASE_URL", "").rstrip("/")
-    ollama_key = os.environ.get("OLLAMA_API_KEY", "")
-    if ollama_url and ollama_key:
+    if any(
+        os.environ.get(name)
+        for name in ("OPENROUTER_API_KEY", "GROQ_API_KEY", "GOOGLE_AI_STUDIO_API_KEY", "GOOGLE_AI_VICTOR_API_KEY")
+    ):
         try:
-            resp = requests.post(
-                f"{ollama_url}/api/chat",
-                headers={"Authorization": f"Bearer {ollama_key}", "Content-Type": "application/json"},
-                json={
-                    "model": "gemma3:4b",
-                    "messages": [
-                        {"role": "system", "content": _EVAL_SYSTEM},
-                        {"role": "user", "content": prompt},
-                    ],
-                    "stream": False,
-                    "format": "json",
-                    "options": {"temperature": 0.3},
-                },
-                timeout=20,
+            content = complete_text(
+                system_prompt=_EVAL_SYSTEM,
+                user_prompt=prompt,
+                temperature=0.3,
+                max_tokens=500,
             )
-            if resp.ok:
-                content = resp.json().get("message", {}).get("content", "")
-                return _parse_eval(content)
+            result = _parse_eval(content)
+            if result:
+                return result
         except Exception:
             pass
-
-    # Fallback: OpenRouter
-    or_key = os.environ.get("OPENROUTER_API_KEY", "")
-    if or_key:
-        for model in [
-            "meta-llama/llama-3.3-70b-instruct:free",
-            "google/gemma-3-27b-it:free",
-            "mistralai/mistral-small-3.1-24b-instruct:free",
-        ]:
-            try:
-                resp = requests.post(
-                    "https://openrouter.ai/api/v1/chat/completions",
-                    headers={
-                        "Authorization": f"Bearer {or_key}",
-                        "HTTP-Referer": "https://github.com/biz-leadgen",
-                        "Content-Type": "application/json",
-                    },
-                    json={
-                        "model": model,
-                        "messages": [
-                            {"role": "system", "content": _EVAL_SYSTEM},
-                            {"role": "user", "content": prompt},
-                        ],
-                        "temperature": 0.3,
-                    },
-                    timeout=25,
-                )
-                if resp.ok:
-                    content = resp.json()["choices"][0]["message"]["content"]
-                    result = _parse_eval(content)
-                    if result:
-                        return result
-            except Exception:
-                continue
 
     return None
 
@@ -459,8 +420,10 @@ def build_website_intel(lead: dict, use_ai: bool = True) -> dict:
     raw_html = lead.get("_raw_html")
     candidate_links = lead.get("_candidate_links", {})
     text_proxy = about + " " + services
-    has_raw_html = bool(raw_html and len(raw_html) > len(text_proxy))
-    gap_profile = detect_gaps(raw_html or text_proxy, candidate_links, allow_negative_inference=has_raw_html)
+    # Allow negative inference (detecting missing features) when we have sufficient content
+    # Raw HTML always allows it; otherwise need at least 50 chars of text
+    allow_negative = bool(raw_html) or len(text_proxy) >= 50
+    gap_profile = detect_gaps(raw_html or text_proxy, candidate_links, allow_negative_inference=allow_negative)
 
     intel["has_booking"]       = gap_profile["has_booking"]
     intel["has_client_portal"] = gap_profile["has_client_portal"]
@@ -555,7 +518,8 @@ def run_website_intel(conn: sqlite3.Connection, use_ai: bool = True, only_missin
         SELECT b.id, b.name, b.category, b.phone, b.website, b.email_maps, b.query, b.target_niche,
                b.validation_status,
                w.about_text, w.services_text, w.emails, w.phones,
-               w.site_url, w.socials, w.tech_stack, w.site_status, w.site_error
+               w.site_url, w.socials, w.tech_stack, w.site_status, w.site_error,
+               w.raw_html
         FROM businesses b
         LEFT JOIN website_data w ON w.business_id = b.id
         WHERE b.website IS NOT NULL AND b.website != ''

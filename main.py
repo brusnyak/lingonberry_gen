@@ -6,7 +6,7 @@ from pathlib import Path
 
 _HERE = Path(__file__).parent
 
-# load ../.env so OLLAMA_BASE_URL, OPENROUTER_API_KEY etc. are available
+# load ../.env so remote provider keys are available
 _env_file = _HERE.parent / ".env"
 if _env_file.exists():
     for _line in _env_file.read_text(encoding="utf-8").splitlines():
@@ -29,11 +29,12 @@ from scrapers.google_maps import scrape_google_maps
 from scrapers.website import scrape_site
 from scrapers.web_search import search_leads as ddg_search_leads, batch_search as ddg_batch_search
 from scrapers.hipages import scrape_hipages
-from scrapers.facebook import scrape_facebook
+from scrapers.facebook import scrape_facebook, run_facebook_enrichment
 from enrichment.ollama import enrich_business
 from enrichment.contact_enrichment import run_contact_enrichment
 from validation.validator import run_validation
 from validation.website_intel import run_website_intel, _ensure_columns as _ensure_intel_cols
+from enrichment.social_discovery import run_social_discovery
 from concurrent.futures import ThreadPoolExecutor, as_completed
 import traceback
 
@@ -48,7 +49,7 @@ def _load_queries(path: str) -> list[str]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Hybrid lead research tool (Google Maps + websites + local LLM)")
+    parser = argparse.ArgumentParser(description="Hybrid lead research tool (Google Maps + websites + remote LLMs)")
     parser.add_argument("--query", help="Search query, e.g. 'dentists in Bratislava'")
     parser.add_argument("--queries-file", help="File with one query per line")
     parser.add_argument("--daily", action="store_true", help="Append today's date to each query to reduce duplicates")
@@ -78,12 +79,15 @@ def main() -> None:
     parser.add_argument("--location", default="sydney", help="Location for hipages/web_search scraping")
     parser.add_argument("--contact-enrich", action="store_true", help="Run contact+pain enrichment on qualified leads missing outreach_angle")
     parser.add_argument("--contact-enrich-all", action="store_true", help="Re-run contact enrichment on all qualified leads")
+    parser.add_argument("--social-discovery", action="store_true", help="Find LinkedIn and Facebook profiles for qualified leads")
+    parser.add_argument("--facebook-enrich", action="store_true", help="Scrape Facebook pages for contact info (enrich existing leads)")
     args = parser.parse_args()
 
     if not args.enrich_approved and not args.query and not args.queries_file \
             and not args.validate and not args.validate_all \
-            and not args.site_intel and not args.site_intel_all:
-        raise SystemExit("Provide --query, --queries-file, --validate, --validate-all, --site-intel, --site-intel-all, --source hipages/web_search/facebook, or --contact-enrich")
+            and not args.site_intel and not args.site_intel_all \
+            and not args.contact_enrich and not args.social_discovery and not args.facebook_enrich and args.source == "google_maps":
+        raise SystemExit("Provide --query, --queries-file, --validate, --validate-all, --site-intel, --site-intel-all, --source, --contact-enrich, --social-discovery, or --facebook-enrich")
 
     queries = []
     if args.query:
@@ -323,6 +327,16 @@ def main() -> None:
         print(f"[contact-enrich] Running contact+pain enrichment (only_missing={only_missing})")
         counts = run_contact_enrichment(conn, limit=200, only_missing=only_missing)
         print(f"[contact-enrich] Done — enriched={counts['enriched']} skipped={counts['skipped']} total={counts['total']}")
+
+    if args.social_discovery:
+        print("[social-discovery] Finding LinkedIn and Facebook profiles for qualified leads...")
+        counts = run_social_discovery(conn, limit=100)
+        print(f"[social-discovery] Done — found={counts['found']} total={counts['total']}")
+
+    if args.facebook_enrich:
+        print("[facebook-enrich] Scraping Facebook accounts for contact info...")
+        counts = run_facebook_enrichment(conn, limit=50, headless=args.headless)
+        print(f"[facebook-enrich] Done — enriched={counts['enriched']} total={counts['total']}")
 
     export_csv(conn, args.csv)
     print(f"[done] Exported CSV to {args.csv}")
