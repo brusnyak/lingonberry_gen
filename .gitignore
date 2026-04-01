@@ -22,6 +22,8 @@ data/debug/
 /data
 data/leads.db-shm
 data/leads.db-wal
+/data/leads.db
+*.db
 
 # Playwright browser profile (contains cookies/session data)
 data/playwright-profile/

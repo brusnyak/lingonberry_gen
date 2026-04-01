@@ -34,6 +34,12 @@ QUERY_MATRIX = [
     "roofer manchester",
     "carpenter london",
     "carpenter manchester",
+    # NZ + IE trades
+    "plumber dublin",
+    "electrician dublin",
+    "plumber auckland",
+    "electrician auckland",
+    "hvac auckland",
     # Dental / medical
     "dentist vienna",
     "dentist bratislava",
@@ -47,7 +53,7 @@ QUERY_MATRIX = [
     "physiotherapist vienna",
     "physiotherapist bratislava",
     "physiotherapist prague",
-    # Real estate
+    # Real estate - EU
     "real estate agent vienna",
     "real estate agent bratislava",
     "real estate agent prague",
@@ -56,6 +62,14 @@ QUERY_MATRIX = [
     "property agency prague",
     "realtor vienna",
     "realtor bratislava",
+    # Real estate - UK (Britain)
+    "real estate agent london",
+    "real estate agent manchester",
+    "real estate agent birmingham",
+    "property agency london",
+    "property agency manchester",
+    "realtor london",
+    "realtor manchester",
     # Accounting / finance
     "accounting firm vienna",
     "accounting firm bratislava",
@@ -127,6 +141,15 @@ WEB_SEARCH_MATRIX: list[tuple[str, str]] = [
     ("plumber perth", "plumber"),
     ("electrician brisbane", "electrician"),
     ("carpenter sydney", "carpenter"),
+    # UK trades
+    ("plumber london", "plumber"),
+    ("electrician manchester", "electrician"),
+    ("hvac birmingham", "hvac"),
+    ("carpenter leeds", "carpenter"),
+    ("plumber dublin", "plumber"),
+    ("electrician dublin", "electrician"),
+    ("plumber auckland", "plumber"),
+    ("electrician auckland", "electrician"),
     # EU niches
     ("dentist bratislava", "dental"),
     ("real estate agent vienna", "real_estate"),
@@ -136,18 +159,30 @@ WEB_SEARCH_MATRIX: list[tuple[str, str]] = [
     ("dental clinic prague", "dental"),
     ("steuerberater wien", "accounting"),
     ("immobilienmakler wien", "real_estate"),
+    # UK real estate
+    ("real estate agent london", "real_estate"),
+    ("property agency manchester", "real_estate"),
 ]
 
 # Facebook search queries — finds businesses with FB presence but no website
 FACEBOOK_MATRIX: list[tuple[str, str]] = [
+    # AU trades
     ("plumber sydney", "plumber"),
     ("electrician melbourne", "electrician"),
     ("plumber brisbane", "plumber"),
+    # UK trades
+    ("plumber london", "plumber"),
+    ("electrician manchester", "electrician"),
+    ("plumber dublin", "plumber"),
+    ("electrician auckland", "electrician"),
+    # EU niches
     ("dentist bratislava", "dental"),
     ("real estate agent vienna", "real_estate"),
     ("accountant prague", "accounting"),
     ("hair salon bratislava", "beauty"),
     ("physiotherapist vienna", "physiotherapy"),
+    # UK real estate
+    ("real estate agent london", "real_estate"),
 ]
 
 _STATE_FILE = _HERE.parent / "data" / "query_rotation.json"

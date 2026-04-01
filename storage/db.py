@@ -1,6 +1,7 @@
+import os
 import sqlite3
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS businesses (
@@ -161,11 +162,54 @@ CREATE TABLE IF NOT EXISTS pain_library (
 """
 
 
-def connect(db_path: str) -> sqlite3.Connection:
-    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
-    conn = sqlite3.connect(db_path)
+def _get_encryption_key() -> Optional[str]:
+    """Get database encryption key from environment variable."""
+    key = os.environ.get("DB_ENCRYPTION_KEY", "").strip()
+    if not key:
+        return None
+    # If key is not hex, derive a 256-bit key using a simple hash
+    # In production, use proper KDF like PBKDF2
+    if len(key) == 64 and all(c in "0123456789abcdefABCDEF" for c in key):
+        return key
+    # Simple derivation: SHA256 of the key, then hex
+    import hashlib
+    return hashlib.sha256(key.encode()).hexdigest()[:64]
+
+def connect_encrypted(db_path: str) -> sqlite3.Connection:
+    """Connect to SQLite database with optional SQLCipher encryption."""
+    # Try to import pysqlcipher3, fall back to standard sqlite3 if not available
+    try:
+        import sqlcipher3 as sqlite3_enc
+        connector = sqlite3_enc
+    except ImportError:
+        # pysqlcipher3 not available, use standard sqlite3 (no encryption)
+        connector = sqlite3
+    
+    conn = connector.connect(db_path)
     conn.row_factory = sqlite3.Row
+    
+    # Apply encryption if key is available
+    key = _get_encryption_key()
+    if key and connector is sqlite3_enc:
+        try:
+            # Set cipher parameters for better security
+            conn.execute("PRAGMA cipher_page_size = 4096")
+            conn.execute("PRAGMA kdf_iter = 256000")
+            conn.execute(f"PRAGMA key = 'x'{key}")
+            # Verify the key worked by trying to read something
+            conn.execute("SELECT count(*) FROM sqlite_master")
+        except Exception as e:
+            raise RuntimeError(f"Failed to unlock database with encryption key: {e}")
+    else:
+        # No encryption or no pysqlcipher3
+        conn.execute("PRAGMA journal_mode=WAL")
+    
     return conn
+
+def connect(db_path: str) -> sqlite3.Connection:
+    """Connect to the leads database with encryption if available."""
+    Path(db_path).parent.mkdir(parents=True, exist_ok=True)
+    return connect_encrypted(db_path)
 
 
 def init_db(conn: sqlite3.Connection) -> None:
