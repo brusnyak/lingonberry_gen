@@ -17,6 +17,23 @@ _HERE = Path(__file__).parent
 
 # EU/SK/CZ/AT — Google Maps queries
 QUERY_MATRIX = [
+    # UK Trades (Priority 1)
+    "plumber london",
+    "plumber manchester",
+    "plumber birmingham",
+    "plumber leeds",
+    "electrician london",
+    "electrician manchester",
+    "electrician birmingham",
+    "electrician leeds",
+    "hvac london",
+    "hvac manchester",
+    "air conditioning london",
+    "air conditioning manchester",
+    "roofer london",
+    "roofer manchester",
+    "carpenter london",
+    "carpenter manchester",
     # Dental / medical
     "dentist vienna",
     "dentist bratislava",

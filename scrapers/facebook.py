@@ -273,3 +273,53 @@ def scrape_facebook(
         browser.close()
 
     return leads
+
+def run_facebook_enrichment(conn, limit=50, headless=True):
+    """
+    Enrich existing qualified leads that have a facebook_url but no email.
+    """
+    query = """
+        SELECT b.id, b.name, w.facebook_url
+        FROM businesses b
+        JOIN website_data w ON w.business_id = b.id
+        WHERE b.validation_status = 'qualified'
+          AND (b.email_maps IS NULL OR b.email_maps = '')
+          AND (w.facebook_url IS NOT NULL AND w.facebook_url != '')
+        LIMIT ?
+    """
+    rows = conn.execute(query, (limit,)).fetchall()
+    if not rows:
+        return {"enriched": 0, "total": 0}
+
+    print(f"[facebook-enrich] Processing {len(rows)} leads...")
+    counts = {"enriched": 0, "total": len(rows)}
+
+    with sync_playwright() as pw:
+        browser = pw.chromium.launch(headless=headless)
+        ctx = browser.new_context(
+            user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            viewport={"width": 1280, "height": 800},
+        )
+        page = ctx.new_page()
+
+        for row in rows:
+            lead_id = row["id"]
+            fb_url = row["facebook_url"]
+            print(f"[facebook-enrich] Scraping: {fb_url}")
+            
+            _human_delay(2.0, 4.0)
+            data = _scrape_fb_page(page, fb_url)
+            
+            if data and data.get("email_maps"):
+                email = data["email_maps"]
+                conn.execute(
+                    "UPDATE businesses SET email_maps = ? WHERE id = ?",
+                    (email, lead_id)
+                )
+                counts["enriched"] += 1
+                print(f"[facebook-enrich] Found email: {email}")
+
+        browser.close()
+
+    conn.commit()
+    return counts

@@ -171,7 +171,7 @@ def connect(db_path: str) -> sqlite3.Connection:
 def init_db(conn: sqlite3.Connection) -> None:
     conn.executescript(SCHEMA)
     # Lightweight migration for new columns
-    cols = {row["name"] for row in conn.execute("PRAGMA table_info(businesses)").fetchall()}
+    cols = {row[1] for row in conn.execute("PRAGMA table_info(businesses)").fetchall()}
     for col, typedef in [
         ("approved", "INTEGER DEFAULT 0"),
         ("approved_at", "TEXT"),
@@ -187,7 +187,7 @@ def init_db(conn: sqlite3.Connection) -> None:
         if col not in cols:
             conn.execute(f"ALTER TABLE businesses ADD COLUMN {col} {typedef}")
 
-    ecols = {row["name"] for row in conn.execute("PRAGMA table_info(enrichment)").fetchall()}
+    ecols = {row[1] for row in conn.execute("PRAGMA table_info(enrichment)").fetchall()}
     if "industry" not in ecols:
         conn.execute("ALTER TABLE enrichment ADD COLUMN industry TEXT")
     if "role" not in ecols:
@@ -195,7 +195,7 @@ def init_db(conn: sqlite3.Connection) -> None:
     if "icp_fit" not in ecols:
         conn.execute("ALTER TABLE enrichment ADD COLUMN icp_fit TEXT")
 
-    wcols = {row["name"] for row in conn.execute("PRAGMA table_info(website_data)").fetchall()}
+    wcols = {row[1] for row in conn.execute("PRAGMA table_info(website_data)").fetchall()}
     for col, typedef in [
         ("site_status",    "TEXT"),
         ("site_error",     "TEXT"),
@@ -205,12 +205,13 @@ def init_db(conn: sqlite3.Connection) -> None:
         ("facebook_url",   "TEXT"),
         ("linkedin_url",   "TEXT"),
         ("language",       "TEXT"),   # detected language code e.g. 'en', 'de', 'sk'
+        ("raw_html",       "TEXT"),   # full HTML content for gap detection
     ]:
         if col not in wcols:
             conn.execute(f"ALTER TABLE website_data ADD COLUMN {col} {typedef}")
 
     # Gap profile columns on businesses table
-    bcols = {row["name"] for row in conn.execute("PRAGMA table_info(businesses)").fetchall()}
+    bcols = {row[1] for row in conn.execute("PRAGMA table_info(businesses)").fetchall()}
     for col, typedef in [
         ("has_booking",       "INTEGER DEFAULT 0"),
         ("has_client_portal", "INTEGER DEFAULT 0"),
@@ -329,10 +330,10 @@ def insert_website_data(conn: sqlite3.Connection, business_id: int, data: Dict[s
         """
         INSERT INTO website_data (business_id, site_url, site_status, site_error,
             about_text, services_text, emails, phones, socials, tech_stack, collected_at,
-            instagram_url, facebook_url, linkedin_url, language)
+            instagram_url, facebook_url, linkedin_url, language, raw_html)
         VALUES (:business_id, :site_url, :site_status, :site_error,
             :about_text, :services_text, :emails, :phones, :socials, :tech_stack, :collected_at,
-            :instagram_url, :facebook_url, :linkedin_url, :language)
+            :instagram_url, :facebook_url, :linkedin_url, :language, :raw_html)
         """,
         {
             "business_id":   business_id,
@@ -350,6 +351,7 @@ def insert_website_data(conn: sqlite3.Connection, business_id: int, data: Dict[s
             "facebook_url":  data.get("facebook_url", ""),
             "linkedin_url":  data.get("linkedin_url", ""),
             "language":      data.get("language", ""),
+            "raw_html":      data.get("raw_html", ""),
         },
     )
     conn.commit()

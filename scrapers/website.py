@@ -42,10 +42,12 @@ TECH_SIGNALS = {
     "drupal":     ["drupal.js", "drupal.org"],
 }
 
-JUNK_EMAIL_DOMAINS = {
-    "sentry.io", "example.com", "test.com", "wixpress.com",
-    "squarespace.com", "shopify.com", "wordpress.com",
-    "schema.org", "w3.org", "googleapis.com",
+# Generic prefixes for prioritization filtering
+_GENERIC_PREFIXES = {
+    "info", "contact", "hello", "admin", "support", "office", "mail", "team",
+    "sales", "enquiries", "enquiry", "noreply", "reception", "booking", "bookings",
+    "accounts", "service", "services", "help", "general", "jobs", "work", "workorders",
+    "clinic", "dental", "praxis", "ordination", "klinika", "centrum",
 }
 
 
@@ -66,27 +68,49 @@ def check_reachable(url: str, timeout: int = 8) -> Dict[str, object]:
     except socket.gaierror as e:
         return {"reachable": False, "status_code": None, "redirect_url": None, "error": f"dns_fail: {e}"}
 
-    # HTTP check
-    try:
-        resp = requests.head(
-            url,
+    def _probe(method: str, target: str) -> Dict[str, object]:
+        resp = requests.request(
+            method,
+            target,
             headers={"User-Agent": USER_AGENT},
             timeout=timeout,
             allow_redirects=True,
         )
-        final_url = resp.url if resp.url != url else None
+        final_url = resp.url if resp.url != target else None
         if resp.status_code >= 400:
             return {"reachable": False, "status_code": resp.status_code, "redirect_url": final_url, "error": f"http_{resp.status_code}"}
         return {"reachable": True, "status_code": resp.status_code, "redirect_url": final_url, "error": None}
+
+    # HTTP check
+    try:
+        probe = _probe("HEAD", url)
+        if probe["reachable"]:
+            return probe
+        if probe["status_code"] in {403, 405} or probe["status_code"] is None:
+            fallback = _probe("GET", url)
+            if fallback["reachable"]:
+                return fallback
+        return probe
     except requests.exceptions.SSLError:
         # Try http fallback
         http_url = url.replace("https://", "http://", 1)
         try:
-            resp = requests.head(http_url, headers={"User-Agent": USER_AGENT}, timeout=timeout, allow_redirects=True)
-            return {"reachable": resp.status_code < 400, "status_code": resp.status_code, "redirect_url": None, "error": "ssl_fallback_http"}
+            probe = _probe("HEAD", http_url)
+            if probe["reachable"]:
+                return {"reachable": True, "status_code": probe["status_code"], "redirect_url": probe["redirect_url"], "error": "ssl_fallback_http"}
+            fallback = _probe("GET", http_url)
+            if fallback["reachable"]:
+                return {"reachable": True, "status_code": fallback["status_code"], "redirect_url": fallback["redirect_url"], "error": "ssl_fallback_http"}
+            return {"reachable": False, "status_code": probe["status_code"], "redirect_url": probe["redirect_url"], "error": probe["error"] or "ssl_fallback_http"}
         except Exception as e2:
             return {"reachable": False, "status_code": None, "redirect_url": None, "error": f"ssl_error: {e2}"}
     except requests.RequestException as e:
+        try:
+            fallback = _probe("GET", url)
+            if fallback["reachable"]:
+                return fallback
+        except Exception:
+            pass
         return {"reachable": False, "status_code": None, "redirect_url": None, "error": str(e)[:120]}
 
 
@@ -195,6 +219,8 @@ def find_candidate_links(html: str, base_url: str) -> Dict[str, str]:
             links.setdefault("services", full)
         if "contact" in text or "contact" in href.lower():
             links.setdefault("contact", full)
+        if any(kw in text or kw in href.lower() for kw in ["team", "staff", "management", "our-people"]):
+            links.setdefault("team", full)
     return links
 
 
@@ -206,7 +232,7 @@ def scrape_site(url: str, sleep_s: float = 0.8) -> Dict:
     """
     Full site scrape. Returns dict with:
       site_url, site_status, site_error, about_text, services_text,
-      emails, phones, socials, tech_stack
+      emails, phones, socials, tech_stack, raw_html
     """
     result = {
         "site_url": url,
@@ -218,6 +244,7 @@ def scrape_site(url: str, sleep_s: float = 0.8) -> Dict:
         "phones": "",
         "socials": "",
         "tech_stack": "",
+        "raw_html": "",
     }
 
     # 1. Reachability
@@ -234,6 +261,9 @@ def scrape_site(url: str, sleep_s: float = 0.8) -> Dict:
     if not html:
         result["site_status"] = "fetch_failed"
         return result
+    
+    # Store raw HTML for gap detection
+    result["raw_html"] = html
 
     # 3. Emails, phones, socials, tech from homepage
     emails = extract_emails(html, effective_url)
@@ -266,19 +296,35 @@ def scrape_site(url: str, sleep_s: float = 0.8) -> Dict:
         if services_html:
             services_text = extract_text(services_html)
 
+    if "team" in links:
+        time.sleep(sleep_s)
+        team_html = fetch(links["team"])
+        if team_html:
+            about_text += "\n\n" + extract_text(team_html)
+            emails += extract_emails(team_html, links["team"])
+
     # Fallback to homepage text
     if not about_text:
         about_text = extract_text(html)
     if not services_text:
         services_text = extract_text(html, max_chars=2000)
 
-    # Deduplicate emails
+    # Deduplicate and Prioritize Emails
     seen = set()
-    clean_emails = []
+    personal_emails = []
+    generic_emails = []
+    
     for e in emails:
         if e not in seen:
             seen.add(e)
-            clean_emails.append(e)
+            prefix = e.split("@")[0].lower()
+            if prefix in _GENERIC_PREFIXES:
+                generic_emails.append(e)
+            else:
+                personal_emails.append(e)
+
+    # Prioritize personal emails first
+    clean_emails = personal_emails + generic_emails
 
     result.update({
         "about_text":    about_text[:3000],
